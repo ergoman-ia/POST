@@ -15,6 +15,7 @@
         import { FIREBASE_CONFIG, GEMINI_API_KEY } from "./secrets.js";
 
         const ADMIN_PASSWORD = "CHANGE_THIS_PASSWORD_GITHUB";
+        window.ADMIN_PASSWORD = ADMIN_PASSWORD;
 
         // --- 1. Firebase 설정 (본인의 프로젝트 키로 교체 필요) ---
         // Firebase 콘솔 -> 프로젝트 설정 -> 내 앱 -> SDK 설정 및 구성 에서 복사
@@ -811,7 +812,7 @@
             if (mode === 'admin') {
                 if (!isAdminAuthenticated) {
                     const password = prompt("관리자 암호를 입력하세요.");
-                    if (password === ADMIN_PASSWORD) { isAdminAuthenticated = true; }
+                    if (password === window.ADMIN_PASSWORD) { isAdminAuthenticated = true; }
                     else { showToast("🚫 암호가 올바르지 않습니다."); return; }
                 }
             }
@@ -2222,6 +2223,7 @@
 
 
 </html>
+
 
 
 
