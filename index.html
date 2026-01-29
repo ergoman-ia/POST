@@ -12,7 +12,9 @@
         import { getAuth, signInAnonymously, signOut } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
         import { getFirestore, collection, addDoc, getDocs, doc, deleteDoc, updateDoc, setDoc, query, orderBy, getDoc, where } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
 
-        import { FIREBASE_CONFIG, GEMINI_API_KEY, ADMIN_PASSWORD } from "./api_keys.js";
+        import { FIREBASE_CONFIG, GEMINI_API_KEY } from "./secrets.js";
+
+        const ADMIN_PASSWORD = "CHANGE_THIS_PASSWORD_GITHUB";
 
         // --- 1. Firebase 설정 (본인의 프로젝트 키로 교체 필요) ---
         // Firebase 콘솔 -> 프로젝트 설정 -> 내 앱 -> SDK 설정 및 구성 에서 복사
@@ -2220,6 +2222,7 @@
 
 
 </html>
+
 
 
 
