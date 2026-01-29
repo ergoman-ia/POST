@@ -20,9 +20,9 @@ jobs:
         uses: actions/checkout@v4
       - name: Create secrets.js
         run: |
-          echo 'export const ADMIN_PASSWORD = "${{ secrets.ADMIN_PASSWORD }}";' >> secrets.js
           echo 'export const FIREBASE_CONFIG = ${{ secrets.FIREBASE_CONFIG }};' >> secrets.js
-          echo 'export const GEMINI_API_KEY = "${{ secrets.GEMINI_API_KEY }}";' >> secrets.js                    
+          echo 'export const GEMINI_API_KEY = "${{ secrets.GEMINI_API_KEY }}";' >> secrets.js
+          echo 'export const ADMIN_PASSWORD = "${{ secrets.ADMIN_PASSWORD }}";' >> secrets.js
       - name: Setup Pages
         uses: actions/configure-pages@v4
       - name: Upload artifact
