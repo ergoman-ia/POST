@@ -7,7 +7,7 @@
     <title>그림에서 잘못된 것은? - AI 분석 통합형</title>
 
     <script type="module">
-        import { FIREBASE_CONFIG, GEMINI_API_KEY } from "./secrets.js";
+        import { FIREBASE_CONFIG, GEMINI_API_KEY, ADMIN_PASSWORD } from "./secrets.js";
 
         import { GoogleGenerativeAI } from "https://esm.run/@google/generative-ai";        
         import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
@@ -811,7 +811,7 @@
             if (mode === 'admin') {
                 if (!isAdminAuthenticated) {
                     const password = prompt("관리자 암호를 입력하세요.");
-                    if (password === 'admin') { isAdminAuthenticated = true; }
+                    if (password === ADMIN_PASSWORD) { isAdminAuthenticated = true; }
                     else { showToast("🚫 암호가 올바르지 않습니다."); return; }
                 }
             }
@@ -2219,5 +2219,6 @@
         }
     </script>
 </body>
+
 
 </html>
