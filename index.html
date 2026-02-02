@@ -771,7 +771,7 @@
         </div>
 
         <div id="userView" class="view-section active">
-            <h2 style="color:var(--primary)">📝 안전보건상에 문제가 있는 곳 모두에 클릭하여 입력하세요.</h2>
+            <h2 id="userGuideTitle" style="color:var(--primary)">📝 안전보건상에 문제가 있는 곳 모두에 클릭하여 입력하세요.</h2>
 
             <div style="text-align:right; margin-bottom:10px;">
                 <input type="file" id="userJsonLoad" hidden accept=".json">
@@ -879,16 +879,14 @@
 
             console.log("현재 모드:", isMobile ? "📱 모바일 (다운로드 차단)" : "🖥️ PC (다운로드 허용)");
 
-            if (isMobile) {
-                // (1) 사용자 모드: 파일 불러오기 버튼 숨김
+            if (isMobile) {                
                 const userLoadBtn = document.getElementById('btnUserLoad');
                 if (userLoadBtn) userLoadBtn.style.display = 'none';
-
-                // (2) 관리자 모드: 분석결과 불러오기 버튼 숨김
+                
                 const adminLoadBtn = document.getElementById('loadBtn');
                 if (adminLoadBtn) adminLoadBtn.style.display = 'none';
                 
-                // (3) 관리자 모드: JSON 불러오기 input 태그도 굳이 필요 없지만 화면엔 안보이니 패스
+                document.getElementById('userGuideTitle').innerText = "📝 안전보건상에 문제점을 모두 추가하여 입력하세요.";
             }
 
             await loadGalleryFromDB();
@@ -2390,3 +2388,4 @@
 </body>
 
 </html>
+
