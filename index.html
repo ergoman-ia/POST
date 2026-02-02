@@ -14,6 +14,8 @@
 
         import { FIREBASE_CONFIG, GEMINI_API_KEY, ADMIN_PASSWORD } from "./secrets.js";
 
+        let isMobile = false;
+        
         window.ADMIN_PASSWORD = ADMIN_PASSWORD;
 
         // --- 1. Firebase 설정 (본인의 프로젝트 키로 교체 필요) ---
@@ -848,8 +850,7 @@
         let savedAnalysisReport = null;
         let analyzedNames = "";
         let activeEditor = null;
-        let tempIssues = []; // 사용자 입력 임시 저장용
-        let isMobile = false;
+        let tempIssues = []; // 사용자 입력 임시 저장용        
 
         window.onload = async () => {
             const userAgent = navigator.userAgent.toLowerCase();
@@ -2376,3 +2377,4 @@
 </body>
 
 </html>
+
