@@ -293,17 +293,17 @@ import { getFirestore, collection, addDoc, getDocs, doc, deleteDoc, updateDoc, s
         @media print {
             @page {
                 size: A4 landscape;
-                margin: 0;
+                margin: 10mm;
             }
 
             html,
             body {
-                width: 297mm;
-                height: 210mm;
+                width: 100%;
+                height: auto !important; /* 고정 높이 제거 (내용만큼 늘어나게) */
                 margin: 0 !important;
                 padding: 0 !important;
                 background: white;
-                overflow: hidden;
+                overflow: visible !important; /* [핵심] 넘치는 내용도 보여줌 (페이지 넘김 허용) */
             }
 
             body>* {
@@ -312,14 +312,12 @@ import { getFirestore, collection, addDoc, getDocs, doc, deleteDoc, updateDoc, s
 
             #printLayer {
                 display: grid !important;
-                position: absolute;
-                top: 0;
-                left: 0;
-                width: 297mm;
-                height: 210mm;
-                padding: 10mm 15mm;
-                /* 상하 10mm, 좌우 15mm */
-                box-sizing: border-box;
+                position: relative !important; /* absolute 대신 relative로 변경하여 흐름을 따름 */
+                top: auto;
+                left: auto;
+                width: 100%;
+                height: auto !important;
+                
                 grid-template-columns: repeat(3, 1fr);
                 grid-auto-rows: 80mm;
                 gap: 5mm;
@@ -328,12 +326,13 @@ import { getFirestore, collection, addDoc, getDocs, doc, deleteDoc, updateDoc, s
             }
 
             #analysisModal[style*="display: flex"] {
-                display: flex !important;
-                position: absolute;
-                top: 0;
-                left: 0;
+                display: block !important; /* flex 대신 block으로 변경하여 페이지 흐름 생성 */
+                position: relative !important; /* absolute 제거 */
+                top: auto;
+                left: auto;
                 width: 100%;
-                height: 100%;
+                height: auto !important; /* 높이 제한 해제 */
+                overflow: visible !important; /* 스크롤바 없애고 전체 내용 노출 */
                 z-index: 10000;
                 background: white;
             }
@@ -342,6 +341,16 @@ import { getFirestore, collection, addDoc, getDocs, doc, deleteDoc, updateDoc, s
                 box-shadow: none;
                 width: 100%;
                 max-width: none;
+                max-height: none !important; /* 내부 높이 제한(85vh) 해제 */
+                height: auto !important;
+                overflow: visible !important;
+                padding: 0;
+                border: none;
+                margin: 0;
+            }
+
+            #analysisModal[style*="display: flex"] ~ #printLayer {
+                display: none !important;
             }
 
             #analysisModal button {
@@ -358,6 +367,7 @@ import { getFirestore, collection, addDoc, getDocs, doc, deleteDoc, updateDoc, s
                 flex-direction: column;
                 height: 80mm;
                 box-sizing: border-box;
+                break-inside: avoid;
                 page-break-inside: avoid;
             }
 
@@ -2352,5 +2362,6 @@ import { getFirestore, collection, addDoc, getDocs, doc, deleteDoc, updateDoc, s
 </body>
 
 </html>
+
 
 
