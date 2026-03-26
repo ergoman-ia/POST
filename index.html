@@ -888,7 +888,6 @@
                 if (adminLoadBtn) adminLoadBtn.style.display = 'none';
 
                 document.getElementById('userGuideTitle').innerText = "📝 안전보건상에 문제점을 모두 추가하여 입력하세요.";
-                document.getElementById('fileInput').setAttribute('capture', 'environment');
             }
 
             await loadGalleryFromDB();
@@ -2162,42 +2161,44 @@
         }
 
         // [신규] DB에서 사진 목록 가져오기 (컬렉션: site_photos)
-        async function loadGalleryFromDB() {
+        function loadGalleryFromDB() {
             try {
-                const { db, collection, getDocs, query, orderBy } = window.fs;
+                const { db, collection, query, orderBy, onSnapshot } = window.fs;
                 const q = query(collection(db, "site_photos"), orderBy("timestamp", "desc"));
-                const snapshot = await getDocs(q);
 
-                const adminGallery = document.getElementById('adminGallery');
-                const userGallery = document.getElementById('userGallery');
+                // onSnapshot으로 변경 → DB 변경 시 PC/모바일 모두 자동 갱신
+                onSnapshot(q, (snapshot) => {
+                    const adminGallery = document.getElementById('adminGallery');
+                    const userGallery = document.getElementById('userGallery');
 
-                let adminHtml = '';
-                let userHtml = '';
+                    let adminHtml = '';
+                    let userHtml = '';
 
-                if (snapshot.empty) {
-                    adminGallery.innerHTML = '<span style="padding:20px; color:#888;">등록된 사진이 없습니다.</span>';
-                    userGallery.innerHTML = '<p style="text-align:center; width:100%; color:#888;">점검할 사진이 없습니다.</p>';
-                    return;
-                }
+                    if (snapshot.empty) {
+                        adminGallery.innerHTML = '<span style="padding:20px; color:#888;">등록된 사진이 없습니다.</span>';
+                        userGallery.innerHTML = '<p style="text-align:center; width:100%; color:#888;">점검할 사진이 없습니다.</p>';
+                        return;
+                    }
 
-                snapshot.forEach(doc => {
-                    const data = doc.data();
-                    // 관리자용 썸네일 (삭제 버튼 포함)
-                    adminHtml += `
-                        <div style="position:relative; min-width:120px; height:100px; border:1px solid #ddd; border-radius:4px; overflow:hidden;">
-                            <img src="${data.image}" style="width:100%; height:100%; object-fit:cover;">
-                            <button onclick="deletePhotoFromDB('${doc.id}')" style="position:absolute; top:0; right:0; background:red; color:white; border:none; cursor:pointer;">X</button>
-                        </div>`;
+                    snapshot.forEach(doc => {
+                        const data = doc.data();
+                        adminHtml += `
+                    <div style="position:relative; min-width:120px; height:100px; border:1px solid #ddd; border-radius:4px; overflow:hidden;">
+                        <img src="${data.image}" style="width:100%; height:100%; object-fit:cover;">
+                        <button onclick="deletePhotoFromDB('${doc.id}')" style="position:absolute; top:0; right:0; background:red; color:white; border:none; cursor:pointer; font-size:14px; padding:2px 6px;">X</button>
+                    </div>`;
 
-                    // 사용자용 썸네일 (클릭 시 선택)
-                    userHtml += `
-                        <div onclick="selectPhoto('${data.image}')" style="cursor:pointer; border:2px solid #eee; border-radius:8px; overflow:hidden; transition:0.2s;" onmouseover="this.style.borderColor='var(--primary)'" onmouseout="this.style.borderColor='#eee'">
-                            <img src="${data.image}" style="width:100%; height:120px; object-fit:cover; display:block;">
-                        </div>`;
+                        userHtml += `
+                    <div onclick="selectPhoto('${data.image}')" style="cursor:pointer; border:2px solid #eee; border-radius:8px; overflow:hidden; transition:0.2s;" onmouseover="this.style.borderColor='var(--primary)'" onmouseout="this.style.borderColor='#eee'">
+                        <img src="${data.image}" style="width:100%; height:120px; object-fit:cover; display:block;">
+                    </div>`;
+                    });
+
+                    adminGallery.innerHTML = adminHtml;
+                    userGallery.innerHTML = userHtml;
+
+                    console.log("📸 갤러리 실시간 동기화 완료");
                 });
-
-                adminGallery.innerHTML = adminHtml;
-                userGallery.innerHTML = userHtml;
 
             } catch (e) {
                 console.error("갤러리 로딩 실패:", e);
@@ -2213,9 +2214,9 @@
                     timestamp: Date.now()
                 });
                 showToast("📸 사진이 갤러리에 추가되었습니다.");
-                loadGalleryFromDB(); // 목록 갱신
+                // onSnapshot이 자동으로 갱신하므로 loadGalleryFromDB() 호출 불필요
             } catch (e) {
-                alert("사진 저장 실패: " + e.message);
+                showToast("⚠️ 사진 저장 실패: " + e.message); // alert → showToast로 교체
             }
         }
 
@@ -2225,7 +2226,7 @@
             try {
                 const { db, doc, deleteDoc } = window.fs;
                 await deleteDoc(doc(db, "site_photos", docId));
-                loadGalleryFromDB();
+                // onSnapshot이 자동으로 갱신하므로 loadGalleryFromDB() 호출 불필요
                 showToast("🗑️ 사진이 삭제되었습니다.");
             } catch (e) {
                 showToast("삭제 실패: " + e.message);
