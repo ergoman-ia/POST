@@ -2186,16 +2186,27 @@
 
                     snapshot.forEach(doc => {
                         const data = doc.data();
+                        
+                        // [추가] 숨김 상태 확인 (기본값은 false)
+                        const isHidden = data.isHidden || false; 
+                        // [추가] 관리자 화면에서 숨겨진 사진은 반투명하게 표시
+                        const opacityStyle = isHidden ? "opacity: 0.3;" : "opacity: 1;"; 
+                        const toggleIcon = isHidden ? "🙈" : "👁️"; 
+
                         adminHtml += `
-                    <div style="position:relative; min-width:120px; height:100px; border:1px solid #ddd; border-radius:4px; overflow:hidden;">
+                    <div style="position:relative; min-width:120px; height:100px; border:1px solid #ddd; border-radius:4px; overflow:hidden; transition: 0.3s; ${opacityStyle}">
                         <img src="${data.image}" style="width:100%; height:100%; object-fit:cover;">
-                        <button onclick="deletePhotoFromDB('${doc.id}')" style="position:absolute; top:0; right:0; background:red; color:white; border:none; cursor:pointer; font-size:14px; padding:2px 6px;">X</button>
+                        <button onclick="togglePhotoVisibility('${doc.id}', ${isHidden})" style="position:absolute; top:0; left:0; background:#475569; color:white; border:none; cursor:pointer; font-size:14px; padding:2px 6px;" title="숨기기/보이기 토글">${toggleIcon}</button>
+                        <button onclick="deletePhotoFromDB('${doc.id}')" style="position:absolute; top:0; right:0; background:red; color:white; border:none; cursor:pointer; font-size:14px; padding:2px 6px;" title="삭제">X</button>
                     </div>`;
 
-                        userHtml += `
+                        // [추가] 사용자 갤러리에는 숨겨지지 않은(isHidden이 false인) 사진만 표시
+                        if (!isHidden) {
+                            userHtml += `
                     <div onclick="selectPhoto('${data.image}')" style="cursor:pointer; border:2px solid #eee; border-radius:8px; overflow:hidden; transition:0.2s;" onmouseover="this.style.borderColor='var(--primary)'" onmouseout="this.style.borderColor='#eee'">
                         <img src="${data.image}" style="width:100%; height:120px; object-fit:cover; display:block;">
                     </div>`;
+                        }
                     });
 
                     adminGallery.innerHTML = adminHtml;
@@ -2234,6 +2245,23 @@
                 showToast("🗑️ 사진이 삭제되었습니다.");
             } catch (e) {
                 showToast("삭제 실패: " + e.message);
+            }
+        }
+
+        // [신규] 사진 숨김/보임 상태 변경 함수
+        async function togglePhotoVisibility(docId, currentHiddenStatus) {
+            try {
+                const { db, doc, updateDoc } = window.fs;
+                // 기존 상태의 반대값(!currentHiddenStatus)으로 DB 업데이트
+                await updateDoc(doc(db, "site_photos", docId), {
+                    isHidden: !currentHiddenStatus
+                });
+                
+                // 알림 메시지 출력
+                showToast(currentHiddenStatus ? "👁️ 사진이 사용자 화면에 다시 표시됩니다." : "🙈 사진이 사용자 화면에서 숨겨졌습니다.");
+                // onSnapshot이 활성화되어 있으므로 화면은 자동으로 갱신됩니다.
+            } catch (e) {
+                showToast("상태 변경 실패: " + e.message);
             }
         }
 
