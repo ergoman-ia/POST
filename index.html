@@ -100,17 +100,11 @@
         .seg button.admin.active { color: var(--admin); }
 
         /* 관리자 암호 바 */
-        .pwd-bar {
-            display: none; background: var(--admin-soft); border-bottom: 1px solid #ede9fe;
+        .pwd-input {
+            padding: 11px 14px; border: 1px solid #ddd6fe; border-radius: var(--radius-sm);
+            text-align: center; letter-spacing: 3px; width: 100%; font-size: .95rem;
         }
-        .pwd-bar .inner {
-            max-width: 960px; margin: 0 auto; padding: 12px 16px;
-            display: flex; gap: 8px; align-items: center; justify-content: center; flex-wrap: wrap;
-        }
-        .pwd-bar input {
-            padding: 10px 14px; border: 1px solid #ddd6fe; border-radius: var(--radius-sm);
-            text-align: center; letter-spacing: 3px; width: 170px; font-size: .95rem;
-        }
+        .pwd-input:focus { outline: none; border-color: var(--admin); }
 
         /* ===== 레이아웃 ===== */
         .wrap { max-width: 960px; margin: 0 auto; padding: 18px 16px 120px; }
@@ -352,22 +346,33 @@
 
         .empty-state { text-align: center; color: var(--faint); padding: 40px 16px; }
 
-        /* 인쇄 (포스트잇) */
+        /* 인쇄 */
         #printLayer { display: none; }
         @media print {
             @page { size: A4 landscape; margin: 10mm; }
-            body * { visibility: hidden; }
-            #printLayer, #printLayer * { visibility: visible; }
-            #printLayer { display: grid !important; position: absolute; top: 0; left: 0; width: 100%;
-                grid-template-columns: repeat(3, 1fr); grid-auto-rows: 80mm; gap: 5mm; }
+            html, body { margin: 0 !important; padding: 0 !important; background: #fff !important; }
+            /* 화면 요소는 전부 인쇄 흐름에서 제거하고 #printLayer만 출력 (겹침·빈 페이지 방지) */
+            body > *:not(#printLayer) { display: none !important; }
+            #printLayer { display: block !important; position: static; width: 100%; }
+
+            /* ===== 포스트잇 모드 ===== */
+            body.printing-postit #printLayer {
+                display: grid !important;
+                grid-template-columns: repeat(3, 1fr); grid-auto-rows: 80mm; gap: 5mm;
+            }
             .post-it { background: #fffb88 !important; border: 1px solid #eab308; padding: 10px; position: relative; overflow: hidden; display: flex; flex-direction: column; height: 80mm; break-inside: avoid; -webkit-print-color-adjust: exact; print-color-adjust: exact; }
-            .post-it h3 { font-size: 14pt; border-bottom: 2px dashed #d97706; padding-bottom: 5px; margin: 0 0 6px; }
-            .post-it .body { flex: 1; font-size: 11pt; line-height: 1.35; word-break: break-all; z-index: 2; }
+            .post-it h3 { font-size: 14pt; border-bottom: 2px dashed #d97706; padding-bottom: 5px; margin: 0 0 6px; color: #000; }
+            .post-it .body { flex: 1; font-size: 11pt; line-height: 1.35; word-break: break-all; z-index: 2; color: #000; }
             .post-it .img { position: absolute; right: 4px; bottom: 4px; width: 52%; height: 52%; opacity: .22; }
             .post-it .img img { width: 100%; height: 100%; object-fit: contain; }
-            .print-report, .print-report * { visibility: visible; }
-            .print-report { position: absolute; top: 0; left: 0; width: 100%; }
-            .no-print { display: none !important; }
+
+            /* ===== 보고서(그룹) 모드 ===== */
+            .print-report { width: 100%; color: #000; }
+            .print-report h1 { font-size: 22pt; margin: 0; }
+            .print-report table { width: 100%; border-collapse: collapse; margin-top: 10px; }
+            .print-report th, .print-report td { border: 1px solid #999; padding: 8px 10px; vertical-align: top; font-size: 11pt; }
+            .print-report th { background: #f1f5f9 !important; -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+            .print-report tr { break-inside: avoid; }
         }
     </style>
 </head>
@@ -384,11 +389,14 @@
         </div>
     </header>
 
-    <div class="pwd-bar" id="pwdBar">
-        <div class="inner">
-            <input type="password" id="adminPwd" placeholder="관리자 암호"
-                onkeydown="if(event.key==='Enter') App.submitPwd()">
-            <button class="btn btn-admin btn-sm" onclick="App.submitPwd()">확인</button>
+    <div class="overlay" id="pwdModal">
+        <div class="modal" style="max-width:300px;">
+            <div class="modal-head"><h2>🔐 관리자 인증</h2><button class="modal-x" onclick="App.closePwd()">×</button></div>
+            <div class="modal-body" style="text-align:center;">
+                <input type="password" id="adminPwd" class="pwd-input" placeholder="관리자 암호"
+                    onkeydown="if(event.key==='Enter') App.submitPwd()">
+                <button class="btn btn-admin btn-block" style="margin-top:14px;" onclick="App.submitPwd()">확인</button>
+            </div>
         </div>
     </div>
 
@@ -420,26 +428,17 @@
             <div id="workView" style="display:none;">
                 <div class="work-head">
                     <button class="btn btn-ghost btn-sm" onclick="App.backToGallery()">← 사진 다시 선택</button>
+                    <button class="btn btn-ghost btn-sm" onclick="App.openZoom()" title="사진을 크게 보고 확대합니다">🔍 크게 보기</button>
                     <button class="btn btn-ghost btn-sm" onclick="App.backupMine()" title="현재 입력을 파일로 저장 (나중에 불러와 수정 가능)">💾 내 점검 백업</button>
                 </div>
 
+                <!-- 이미지 + 다른 분석자 결과 -->
                 <div class="panel" style="padding:14px;">
                     <div class="stage-wrap">
                         <div class="stage" id="stage">
                             <div class="stage-hint" id="stageHint">📍 위험한 곳을 눌러 표시하세요</div>
-                            <div class="stage-tools">
-                                <button onclick="App.openZoom()" title="크게 보기">🔍</button>
-                            </div>
                         </div>
                     </div>
-
-                    <div class="quick-add">
-                        <input type="text" id="quickInput" placeholder="사진 없이 글로 추가 (예: 안전모 미착용)"
-                            onkeydown="if(event.key==='Enter') App.quickAdd()">
-                        <button class="btn btn-soft" onclick="App.quickAdd()">추가</button>
-                    </div>
-
-                    <ul id="issueList" class="issue-list"></ul>
 
                     <div id="peerBox" class="peer-box" style="display:none;">
                         <div class="head" id="peerHead">💡 다른 분석자들의 결과</div>
@@ -447,8 +446,18 @@
                     </div>
                 </div>
 
+                <!-- 내 위험요인 입력 + 이름/소속 -->
                 <div class="panel">
-                    <div class="grid-2">
+                    <h2 class="section-title" style="font-size:1rem;">📝 내가 찾은 위험요인</h2>
+                    <div class="quick-add" style="margin-top:10px;">
+                        <input type="text" id="quickInput" placeholder="사진 없이 글로 추가 (예: 안전모 미착용)"
+                            onkeydown="if(event.key==='Enter') App.quickAdd()">
+                        <button class="btn btn-soft" onclick="App.quickAdd()">추가</button>
+                    </div>
+
+                    <ul id="issueList" class="issue-list"></ul>
+
+                    <div class="grid-2" style="margin-top:16px; padding-top:16px; border-top:1px dashed var(--line);">
                         <div class="field">
                             <label for="userName">이름</label>
                             <input type="text" id="userName" placeholder="예: 홍길동">
@@ -576,7 +585,7 @@
     <div class="zoom-overlay" id="zoomOverlay">
         <button class="zoom-close" onclick="App.closeZoom()">×</button>
         <img id="zoomImg" src="" alt="확대 보기">
-        <div class="zoom-tip">손가락으로 확대 / 드래그하여 이동</div>
+        <div class="zoom-tip">두 손가락(또는 더블탭·마우스 휠)으로 확대 · 드래그로 이동</div>
     </div>
 
     <div id="printLayer"></div>
@@ -671,6 +680,12 @@
 
         // 줌 제스처
         setupZoom();
+
+        // 인쇄 종료 후 정리 — 다음 인쇄와의 내용 겹침 방지
+        window.addEventListener("afterprint", () => {
+            document.body.classList.remove("printing-postit", "printing-report");
+            document.getElementById("printLayer").innerHTML = "";
+        });
     }
 
     /* =========================================================
@@ -678,13 +693,10 @@
        ========================================================= */
     function switchMode(mode) {
         if (mode === "admin" && !isAdminAuth) {
-            const bar = document.getElementById("pwdBar");
-            const show = bar.style.display !== "block";
-            bar.style.display = show ? "block" : "none";
-            if (show) setTimeout(() => document.getElementById("adminPwd").focus(), 50);
+            document.getElementById("pwdModal").classList.add("show");
+            setTimeout(() => document.getElementById("adminPwd").focus(), 60);
             return;
         }
-        document.getElementById("pwdBar").style.display = "none";
         document.querySelectorAll(".view").forEach((v) => v.classList.remove("active"));
         document.querySelectorAll("#modeSeg button").forEach((b) => b.classList.remove("active"));
 
@@ -705,12 +717,18 @@
         if (input.value === window.ADMIN_PASSWORD) {
             isAdminAuth = true;
             input.value = "";
+            document.getElementById("pwdModal").classList.remove("show");
             switchMode("admin");
         } else {
             showToast("🚫 암호가 올바르지 않습니다");
             input.value = "";
             input.focus();
         }
+    }
+
+    function closePwd() {
+        document.getElementById("pwdModal").classList.remove("show");
+        document.getElementById("adminPwd").value = "";
     }
 
     async function logoutAdmin() {
@@ -1238,6 +1256,7 @@
                 <div class="body">${(e.issues || []).map((s) => `· ${esc(s)}`).join("<br>")}</div>
                 <div class="img"><img src="${e.photo}"></div>
             </div>`).join("");
+        document.body.classList.add("printing-postit");
         window.print();
     }
 
@@ -1435,9 +1454,34 @@ ${JSON.stringify(issuesArr)}
                 </tr>`).join("")}</tbody></table></div>
                 <div class="no-print" style="margin-top:16px; display:flex; justify-content:center; gap:8px;">
                     <button class="btn btn-ghost" onclick="App.modifyReGroup()">✏️ 재그룹 수정</button>
-                    <button class="btn btn-primary" onclick="window.print()">🖨️ 보고서 인쇄</button>
+                    <button class="btn btn-primary" onclick="App.printReport()">🖨️ 보고서 인쇄</button>
                 </div>`;
         document.getElementById("analysisBody").innerHTML = header + table;
+    }
+
+    /* 보고서(그룹)를 전용 인쇄 레이어로 출력 — 포스트잇과 완전 분리 */
+    function printReport() {
+        if (!savedReport) return;
+        const html = `<div class="print-report">
+            <div style="text-align:center; margin-bottom:14px; padding-bottom:10px; border-bottom:2px solid #333;">
+                <h1>선택 항목 문제점 그룹화 결과</h1>
+                <p style="margin-top:8px;">${esc(analyzedNames)}</p>
+            </div>
+            <table>
+                <thead><tr>
+                    <th style="width:34%;">핵심키워드</th>
+                    <th>구성 내용</th>
+                    <th style="width:10%;">비율</th>
+                </tr></thead>
+                <tbody>${savedReport.map((r) => `<tr>
+                    <td style="font-weight:700; text-align:center;">${esc(r.keyword)}</td>
+                    <td style="line-height:1.6;">${r.content}</td>
+                    <td style="font-weight:700; text-align:center;">${esc(r.ratio)}</td>
+                </tr>`).join("")}</tbody>
+            </table></div>`;
+        document.getElementById("printLayer").innerHTML = html;
+        document.body.classList.add("printing-report");
+        window.print();
     }
 
     function modifyReGroup() {
@@ -1551,7 +1595,7 @@ ${JSON.stringify(issuesArr)}
             applyZoom();
         }, { passive: false });
         img.addEventListener("dblclick", () => {
-            zoomState.scale = zoomState.scale > 1 ? 1 : 2;
+            zoomState.scale = zoomState.scale > 1 ? 1 : 2.6;
             if (zoomState.scale === 1) { zoomState.x = 0; zoomState.y = 0; }
             applyZoom();
         });
@@ -1802,11 +1846,11 @@ ${JSON.stringify(issuesArr)}
        외부 노출 (inline onclick 핸들러)
        ========================================================= */
     window.App = {
-        submitPwd, logoutAdmin,
+        submitPwd, closePwd, logoutAdmin,
         backToGallery, quickAdd, openZoom, closeZoom,
         saveSheet, closeSheet, deleteActivePin,
         closePeerModal, submitEntry, backupMine,
-        selectAll, clearFilter, printAll, analyze, closeModal,
+        selectAll, clearFilter, printAll, printReport, analyze, closeModal,
         saveReGrouped, showReport, modifyReGroup, resetReGroup,
         renderTable
     };
