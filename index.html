@@ -168,7 +168,7 @@
         .gallery-card .meta {
             position: absolute; left: 0; bottom: 0; right: 0; padding: 14px 10px 8px;
             background: linear-gradient(transparent, rgba(0, 0, 0, .55)); color: #fff;
-            font-size: .74rem; font-weight: 600; display: flex; justify-content: space-between; align-items: center;
+            font-size: .74rem; font-weight: 600; display: flex; justify-content: flex-end; align-items: center;
         }
         .reviewed-badge { background: rgba(255, 255, 255, .92); color: var(--primary-dark); border-radius: 999px; padding: 2px 8px; font-size: .68rem; }
 
@@ -236,6 +236,13 @@
             padding: 6px 12px; border-radius: 999px; font-size: .8rem; font-weight: 600; cursor: pointer; transition: .15s;
         }
         .peer-badge:hover { background: var(--primary); color: #fff; border-color: var(--primary); }
+
+        @media (max-width: 768px) {
+            .peer-badges { display: grid; grid-template-columns: repeat(3, 1fr); gap: 5px; }
+            .peer-badge { padding: 6px 4px; font-size: .68rem; text-align: center;
+                white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+            .stage { cursor: default; }
+        }
 
         /* 등록 영역 (고정) */
         .submit-bar {
@@ -427,8 +434,7 @@
             <!-- 작업 -->
             <div id="workView" style="display:none;">
                 <div class="work-head">
-                    <button class="btn btn-ghost btn-sm" onclick="App.backToGallery()">← 사진 다시 선택</button>
-                    <button class="btn btn-ghost btn-sm" onclick="App.openZoom()" title="사진을 크게 보고 확대합니다">🔍 크게 보기</button>
+                    <button class="btn btn-ghost btn-sm" onclick="App.backToGallery()">← 사진 다시 선택</button>                    
                     <button class="btn btn-ghost btn-sm" onclick="App.backupMine()" title="현재 입력을 파일로 저장 (나중에 불러와 수정 가능)">💾 내 점검 백업</button>
                 </div>
 
@@ -639,6 +645,11 @@
         isMobile = /android|iphone|ipad|ipod|blackberry|iemobile|opera mini/i.test(navigator.userAgent.toLowerCase())
             || window.innerWidth <= 768;
 
+        if (isMobile) {
+            const hint = document.getElementById("stageHint");
+            if (hint) hint.innerHTML = "📱 휴대폰에서는 사진 표시가 제한됩니다<br>아래 칸에 글로 위험요인을 입력하세요";
+        }
+
         // 저장된 이름/소속 복원
         try {
             document.getElementById("userName").value = localStorage.getItem(LS.name) || "";
@@ -780,10 +791,10 @@
         }
         wrap.innerHTML = visible.map((p) => {
             const cnt = entryList.filter((it) => it.photo === p.image).length;
-            const badge = cnt > 0 ? `<span class="reviewed-badge">분석 ${cnt}</span>` : `<span style="opacity:.85;">점검하기 →</span>`;
+            const badge = cnt > 0 ? `<span class="reviewed-badge">${cnt}명 분석</span>` : `<span style="opacity:.85;">점검하기 →</span>`;
             return `<div class="gallery-card" data-img="${esc(p.image)}">
                         <img src="${p.image}" alt="현장 사진">
-                        <div class="meta"><span>현장</span>${badge}</div>
+                        <div class="meta">${badge}</div>
                     </div>`;
         }).join("");
         wrap.querySelectorAll(".gallery-card").forEach((card) => {
@@ -846,7 +857,8 @@
     }
 
     function onStageClick(e) {
-        if (e.target.closest(".pin") || e.target.closest(".stage-tools") || e.target.closest(".stage-hint")) return;
+        if (isMobile) return; // 휴대폰에서는 사진 핀 입력 비활성화 (글 입력만 사용)
+        if (e.target.closest(".pin") || e.target.closest(".stage-hint")) return;
         const img = document.querySelector("#stage img");
         if (!img) return;
         const rect = img.getBoundingClientRect();
