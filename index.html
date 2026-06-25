@@ -238,6 +238,9 @@
         .peer-badge:hover { background: var(--primary); color: #fff; border-color: var(--primary); }
 
         @media (max-width: 768px) {
+            #modeSeg { display: none; }          /* 휴대폰: 분석자 모드로 고정 */
+            .pc-only { display: none !important; } /* 휴대폰: 백업 등 PC 전용 기능 숨김 */
+            #stageHint { display: none !important; }
             .peer-badges { display: grid; grid-template-columns: repeat(3, 1fr); gap: 5px; }
             .peer-badge { padding: 6px 4px; font-size: .68rem; text-align: center;
                 white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
@@ -345,12 +348,6 @@
         #toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
 
         /* 줌 뷰어 */
-        .zoom-overlay { display: none; position: fixed; inset: 0; background: rgba(0, 0, 0, .92); z-index: 1500; align-items: center; justify-content: center; touch-action: none; }
-        .zoom-overlay.show { display: flex; }
-        .zoom-overlay img { max-width: 100%; max-height: 100%; transform-origin: center; will-change: transform; }
-        .zoom-close { position: absolute; top: 16px; right: 16px; width: 44px; height: 44px; border-radius: 50%; border: none; background: rgba(255, 255, 255, .15); color: #fff; font-size: 1.4rem; cursor: pointer; z-index: 2; }
-        .zoom-tip { position: absolute; bottom: 24px; left: 50%; transform: translateX(-50%); color: rgba(255, 255, 255, .7); font-size: .82rem; }
-
         .empty-state { text-align: center; color: var(--faint); padding: 40px 16px; }
 
         /* 인쇄 */
@@ -434,8 +431,8 @@
             <!-- 작업 -->
             <div id="workView" style="display:none;">
                 <div class="work-head">
-                    <button class="btn btn-ghost btn-sm" onclick="App.backToGallery()">← 사진 다시 선택</button>                    
-                    <button class="btn btn-ghost btn-sm" onclick="App.backupMine()" title="현재 입력을 파일로 저장 (나중에 불러와 수정 가능)">💾 내 점검 백업</button>
+                    <button class="btn btn-ghost btn-sm" onclick="App.backToGallery()">← 사진 다시 선택</button>
+                    <button class="btn btn-ghost btn-sm pc-only" onclick="App.backupMine()" title="현재 입력을 파일로 저장 (나중에 불러와 수정 가능)">💾 내 점검 백업</button>
                 </div>
 
                 <!-- 이미지 + 다른 분석자 결과 -->
@@ -588,12 +585,6 @@
     </div>
 
     <!-- 줌 뷰어 -->
-    <div class="zoom-overlay" id="zoomOverlay">
-        <button class="zoom-close" onclick="App.closeZoom()">×</button>
-        <img id="zoomImg" src="" alt="확대 보기">
-        <div class="zoom-tip">두 손가락(또는 더블탭·마우스 휠)으로 확대 · 드래그로 이동</div>
-    </div>
-
     <div id="printLayer"></div>
     <div id="toast"></div>
 
@@ -645,11 +636,6 @@
         isMobile = /android|iphone|ipad|ipod|blackberry|iemobile|opera mini/i.test(navigator.userAgent.toLowerCase())
             || window.innerWidth <= 768;
 
-        if (isMobile) {
-            const hint = document.getElementById("stageHint");
-            if (hint) hint.innerHTML = "📱 휴대폰에서는 사진 표시가 제한됩니다<br>아래 칸에 글로 위험요인을 입력하세요";
-        }
-
         // 저장된 이름/소속 복원
         try {
             document.getElementById("userName").value = localStorage.getItem(LS.name) || "";
@@ -688,9 +674,6 @@
         document.getElementById("userJsonLoad").addEventListener("change", onUserJsonLoad);
         // 관리자 분석결과 JSON 불러오기
         document.getElementById("jsonLoader").addEventListener("change", onReportJsonLoad);
-
-        // 줌 제스처
-        setupZoom();
 
         // 인쇄 종료 후 정리 — 다음 인쇄와의 내용 겹침 방지
         window.addEventListener("afterprint", () => {
@@ -1554,64 +1537,6 @@ ${JSON.stringify(issuesArr)}
 
     function closeModal() { document.getElementById("analysisModal").classList.remove("show"); }
 
-    /* =========================================================
-       확대 보기 (핀치 줌 / 드래그)
-       ========================================================= */
-    let zoomState = { scale: 1, x: 0, y: 0, startDist: 0, startScale: 1, dragging: false, sx: 0, sy: 0, ox: 0, oy: 0 };
-    function openZoom() {
-        if (!currentPhoto) return;
-        const img = document.getElementById("zoomImg");
-        img.src = currentPhoto;
-        zoomState = { scale: 1, x: 0, y: 0, startDist: 0, startScale: 1, dragging: false, sx: 0, sy: 0, ox: 0, oy: 0 };
-        applyZoom();
-        document.getElementById("zoomOverlay").classList.add("show");
-    }
-    function closeZoom() { document.getElementById("zoomOverlay").classList.remove("show"); }
-    function applyZoom() {
-        document.getElementById("zoomImg").style.transform =
-            `translate(${zoomState.x}px, ${zoomState.y}px) scale(${zoomState.scale})`;
-    }
-    function setupZoom() {
-        const overlay = document.getElementById("zoomOverlay");
-        const img = document.getElementById("zoomImg");
-        const dist = (t) => Math.hypot(t[0].clientX - t[1].clientX, t[0].clientY - t[1].clientY);
-
-        overlay.addEventListener("touchstart", (e) => {
-            if (e.target === overlay) return;
-            if (e.touches.length === 2) { zoomState.startDist = dist(e.touches); zoomState.startScale = zoomState.scale; }
-            else if (e.touches.length === 1 && zoomState.scale > 1) {
-                zoomState.dragging = true; zoomState.sx = e.touches[0].clientX; zoomState.sy = e.touches[0].clientY;
-                zoomState.ox = zoomState.x; zoomState.oy = zoomState.y;
-            }
-        }, { passive: false });
-        overlay.addEventListener("touchmove", (e) => {
-            if (e.touches.length === 2) {
-                e.preventDefault();
-                zoomState.scale = Math.min(5, Math.max(1, zoomState.startScale * (dist(e.touches) / zoomState.startDist)));
-                if (zoomState.scale === 1) { zoomState.x = 0; zoomState.y = 0; }
-                applyZoom();
-            } else if (zoomState.dragging) {
-                e.preventDefault();
-                zoomState.x = zoomState.ox + (e.touches[0].clientX - zoomState.sx);
-                zoomState.y = zoomState.oy + (e.touches[0].clientY - zoomState.sy);
-                applyZoom();
-            }
-        }, { passive: false });
-        overlay.addEventListener("touchend", (e) => { if (e.touches.length === 0) zoomState.dragging = false; });
-
-        // 데스크톱: 휠 줌, 더블클릭 토글
-        img.addEventListener("wheel", (e) => {
-            e.preventDefault();
-            zoomState.scale = Math.min(5, Math.max(1, zoomState.scale + (e.deltaY < 0 ? 0.2 : -0.2)));
-            if (zoomState.scale === 1) { zoomState.x = 0; zoomState.y = 0; }
-            applyZoom();
-        }, { passive: false });
-        img.addEventListener("dblclick", () => {
-            zoomState.scale = zoomState.scale > 1 ? 1 : 2.6;
-            if (zoomState.scale === 1) { zoomState.x = 0; zoomState.y = 0; }
-            applyZoom();
-        });
-    }
 
     /* =========================================================
        공통 유틸
@@ -1859,7 +1784,7 @@ ${JSON.stringify(issuesArr)}
        ========================================================= */
     window.App = {
         submitPwd, closePwd, logoutAdmin,
-        backToGallery, quickAdd, openZoom, closeZoom,
+        backToGallery, quickAdd,
         saveSheet, closeSheet, deleteActivePin,
         closePeerModal, submitEntry, backupMine,
         selectAll, clearFilter, printAll, printReport, analyze, closeModal,
