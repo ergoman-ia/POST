@@ -1,0 +1,1818 @@
+<!DOCTYPE html>
+<html lang="ko">
+
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>현장 위험요인 점검 · AI 분석</title>
+
+    <link rel="preconnect" href="https://cdn.jsdelivr.net">
+    <link
+        href="https://cdn.jsdelivr.net/gh/orioncactus/pretendard@v1.3.9/dist/web/static/pretendard.min.css"
+        rel="stylesheet">
+
+    <!-- ===== Firebase + Gemini 초기화 (기존 흐름 유지) ===== -->
+    <script type="module">
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/12.14.0/firebase-app.js";
+        import { getAuth, signInAnonymously } from "https://www.gstatic.com/firebasejs/12.14.0/firebase-auth.js";
+        import {
+            getFirestore, collection, addDoc, getDocs, doc, deleteDoc, updateDoc,
+            setDoc, query, orderBy, getDoc, where, onSnapshot
+        } from "https://www.gstatic.com/firebasejs/12.14.0/firebase-firestore.js";
+
+        import { FIREBASE_CONFIG, GEMINI_API_KEY, ADMIN_PASSWORD } from "./secrets.js";
+
+        window.GEMINI_API_KEY = GEMINI_API_KEY;
+        window.ADMIN_PASSWORD = ADMIN_PASSWORD;
+
+        const app = initializeApp(FIREBASE_CONFIG);
+        const db = getFirestore(app);
+
+        // 일반 스크립트에서 사용하기 위해 window에 등록
+        window.fs = { db, collection, addDoc, getDocs, doc, deleteDoc, updateDoc, setDoc, query, orderBy, getDoc, where, onSnapshot };
+        window.dispatchEvent(new Event("fs-ready"));
+
+        signInAnonymously(getAuth())
+            .then(() => console.log("익명 로그인 성공"))
+            .catch((e) => console.error("로그인 실패:", e));
+    </script>
+
+    <style>
+        :root {
+            --primary: #2563eb;
+            --primary-dark: #1d4ed8;
+            --primary-soft: #eff6ff;
+            --admin: #7c3aed;
+            --admin-soft: #f5f3ff;
+            --success: #16a34a;
+            --danger: #ef4444;
+            --warn: #d97706;
+            --ink: #0f172a;
+            --muted: #64748b;
+            --faint: #94a3b8;
+            --line: #e2e8f0;
+            --bg: #f1f5f9;
+            --surface: #ffffff;
+            --radius: 14px;
+            --radius-sm: 9px;
+            --shadow: 0 1px 3px rgba(15, 23, 42, .06), 0 6px 20px rgba(15, 23, 42, .05);
+            --shadow-lg: 0 10px 40px rgba(15, 23, 42, .18);
+        }
+
+        * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+
+        html, body { margin: 0; padding: 0; }
+
+        body {
+            font-family: 'Pretendard', -apple-system, 'Apple SD Gothic Neo', 'Malgun Gothic', sans-serif;
+            background: var(--bg);
+            color: var(--ink);
+            line-height: 1.5;
+            -webkit-font-smoothing: antialiased;
+        }
+
+        h1, h2, h3, h4 { margin: 0; font-weight: 700; letter-spacing: -.01em; }
+
+        /* ===== 상단 바 ===== */
+        .topbar {
+            position: sticky; top: 0; z-index: 50;
+            background: rgba(255, 255, 255, .85);
+            backdrop-filter: saturate(180%) blur(12px);
+            border-bottom: 1px solid var(--line);
+        }
+        .topbar-inner {
+            max-width: 960px; margin: 0 auto;
+            display: flex; align-items: center; justify-content: space-between;
+            gap: 12px; padding: 10px 16px;
+        }
+        .brand { display: flex; align-items: center; gap: 9px; font-weight: 800; font-size: 1.02rem; }
+        .brand .dot { width: 11px; height: 11px; border-radius: 50%; background: var(--primary); box-shadow: 0 0 0 4px var(--primary-soft); }
+        .seg {
+            display: inline-flex; background: var(--bg); padding: 3px; border-radius: 999px; border: 1px solid var(--line);
+        }
+        .seg button {
+            border: none; background: transparent; cursor: pointer;
+            font-weight: 600; font-size: .82rem; color: var(--muted);
+            padding: 7px 14px; border-radius: 999px; transition: .15s;
+            display: inline-flex; align-items: center; gap: 5px;
+        }
+        .seg button.active { background: var(--surface); color: var(--primary); box-shadow: var(--shadow); }
+        .seg button.admin.active { color: var(--admin); }
+
+        /* 관리자 암호 바 */
+        .pwd-bar {
+            display: none; background: var(--admin-soft); border-bottom: 1px solid #ede9fe;
+        }
+        .pwd-bar .inner {
+            max-width: 960px; margin: 0 auto; padding: 12px 16px;
+            display: flex; gap: 8px; align-items: center; justify-content: center; flex-wrap: wrap;
+        }
+        .pwd-bar input {
+            padding: 10px 14px; border: 1px solid #ddd6fe; border-radius: var(--radius-sm);
+            text-align: center; letter-spacing: 3px; width: 170px; font-size: .95rem;
+        }
+
+        /* ===== 레이아웃 ===== */
+        .wrap { max-width: 960px; margin: 0 auto; padding: 18px 16px 120px; }
+        .view { display: none; }
+        .view.active { display: block; animation: fade .25s ease; }
+        @keyframes fade { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }
+
+        .panel {
+            background: var(--surface); border: 1px solid var(--line);
+            border-radius: var(--radius); box-shadow: var(--shadow); padding: 18px;
+        }
+        .panel + .panel { margin-top: 16px; }
+        .section-title { font-size: 1.05rem; display: flex; align-items: center; gap: 8px; margin-bottom: 4px; }
+        .section-sub { color: var(--muted); font-size: .85rem; margin: 2px 0 14px; }
+
+        /* ===== 버튼 ===== */
+        .btn {
+            appearance: none; border: 1px solid transparent; cursor: pointer;
+            font-family: inherit; font-weight: 600; font-size: .9rem;
+            padding: 11px 18px; border-radius: var(--radius-sm); color: #fff;
+            display: inline-flex; align-items: center; justify-content: center; gap: 7px;
+            transition: filter .15s, transform .05s, background .15s; line-height: 1;
+        }
+        .btn:active { transform: translateY(1px); }
+        .btn:hover { filter: brightness(1.05); }
+        .btn-primary { background: var(--primary); }
+        .btn-admin { background: var(--admin); }
+        .btn-success { background: var(--success); }
+        .btn-danger { background: var(--danger); }
+        .btn-ghost { background: var(--surface); color: var(--muted); border-color: var(--line); }
+        .btn-ghost:hover { color: var(--ink); background: var(--bg); filter: none; }
+        .btn-soft { background: var(--primary-soft); color: var(--primary-dark); }
+        .btn-soft:hover { filter: none; background: #dbeafe; }
+        .btn-sm { padding: 8px 13px; font-size: .82rem; }
+        .btn-block { width: 100%; }
+        .btn[disabled] { opacity: .45; cursor: not-allowed; }
+
+        /* ===== 입력 ===== */
+        .field { display: flex; flex-direction: column; gap: 6px; }
+        .field label { font-size: .8rem; font-weight: 600; color: var(--muted); }
+        input[type="text"], input[type="password"], input[type="date"], textarea {
+            font-family: inherit; font-size: 1rem; color: var(--ink);
+            padding: 12px 14px; border: 1px solid var(--line); border-radius: var(--radius-sm);
+            background: var(--surface); width: 100%; transition: border-color .15s, box-shadow .15s;
+        }
+        input:focus, textarea:focus { outline: none; border-color: var(--primary); box-shadow: 0 0 0 3px var(--primary-soft); }
+        .grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+        @media (max-width: 620px) { .grid-2 { grid-template-columns: 1fr; } }
+
+        /* ===== 사용자 갤러리 ===== */
+        .gallery-grid {
+            display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 14px;
+        }
+        .gallery-card {
+            position: relative; cursor: pointer; border-radius: var(--radius);
+            overflow: hidden; border: 1px solid var(--line); background: var(--bg);
+            transition: transform .15s, box-shadow .15s, border-color .15s;
+        }
+        .gallery-card:hover { transform: translateY(-2px); box-shadow: var(--shadow); border-color: var(--primary); }
+        .gallery-card img { width: 100%; height: 130px; object-fit: cover; display: block; }
+        .gallery-card .meta {
+            position: absolute; left: 0; bottom: 0; right: 0; padding: 14px 10px 8px;
+            background: linear-gradient(transparent, rgba(0, 0, 0, .55)); color: #fff;
+            font-size: .74rem; font-weight: 600; display: flex; justify-content: space-between; align-items: center;
+        }
+        .reviewed-badge { background: rgba(255, 255, 255, .92); color: var(--primary-dark); border-radius: 999px; padding: 2px 8px; font-size: .68rem; }
+
+        /* ===== 작업 화면 (사진 + 핀) ===== */
+        .work-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-bottom: 14px; }
+        .stage-wrap { position: relative; background: #0f172a; border-radius: var(--radius); overflow: hidden; }
+        .stage { position: relative; display: block; width: 100%; cursor: crosshair; touch-action: manipulation; user-select: none; }
+        .stage img { width: 100%; height: auto; display: block; pointer-events: none; }
+
+        .pin {
+            position: absolute; transform: translate(-50%, -100%);
+            width: 30px; height: 38px; z-index: 5; cursor: pointer;
+            display: flex; flex-direction: column; align-items: center;
+            filter: drop-shadow(0 2px 3px rgba(0, 0, 0, .4));
+            animation: drop .25s cubic-bezier(.2, .8, .3, 1.4);
+        }
+        @keyframes drop { from { opacity: 0; transform: translate(-50%, -130%); } to { opacity: 1; transform: translate(-50%, -100%); } }
+        .pin .bub {
+            width: 26px; height: 26px; border-radius: 50% 50% 50% 0; transform: rotate(-45deg);
+            background: var(--danger); border: 2px solid #fff;
+            display: flex; align-items: center; justify-content: center;
+        }
+        .pin .num { transform: rotate(45deg); color: #fff; font-size: .76rem; font-weight: 800; }
+        .pin.active .bub { background: var(--primary); }
+
+        .stage-hint {
+            position: absolute; left: 50%; top: 12px; transform: translateX(-50%);
+            background: rgba(15, 23, 42, .78); color: #fff; font-size: .8rem; font-weight: 600;
+            padding: 7px 14px; border-radius: 999px; pointer-events: none; z-index: 6;
+            display: flex; align-items: center; gap: 6px; backdrop-filter: blur(4px);
+        }
+        .stage-tools { position: absolute; right: 10px; bottom: 10px; z-index: 6; display: flex; gap: 6px; }
+        .stage-tools button {
+            width: 38px; height: 38px; border-radius: 10px; border: none; cursor: pointer;
+            background: rgba(255, 255, 255, .92); color: var(--ink); font-size: 1.05rem;
+            box-shadow: var(--shadow); display: flex; align-items: center; justify-content: center;
+        }
+
+        /* 문제점 리스트 */
+        .issue-list { list-style: none; padding: 0; margin: 14px 0 0; display: flex; flex-direction: column; gap: 8px; }
+        .issue-item {
+            display: flex; align-items: center; gap: 10px; background: var(--bg);
+            border: 1px solid var(--line); border-radius: var(--radius-sm); padding: 10px 12px;
+            transition: border-color .15s, background .15s;
+        }
+        .issue-item:hover { border-color: var(--primary); background: var(--primary-soft); }
+        .issue-item .idx {
+            flex: none; width: 24px; height: 24px; border-radius: 50%; background: var(--danger); color: #fff;
+            font-size: .78rem; font-weight: 800; display: flex; align-items: center; justify-content: center;
+        }
+        .issue-item .txt { flex: 1; font-size: .92rem; cursor: pointer; word-break: break-word; }
+        .issue-item .del { flex: none; border: none; background: transparent; color: var(--faint); cursor: pointer; font-size: 1.1rem; padding: 4px; border-radius: 6px; }
+        .issue-item .del:hover { color: var(--danger); background: #fee2e2; }
+        .issue-empty { text-align: center; color: var(--faint); font-size: .88rem; padding: 18px 0; }
+
+        .quick-add { display: flex; gap: 8px; margin-top: 12px; }
+        .quick-add input { flex: 1; }
+
+        /* 동료 분석 */
+        .peer-box { margin-top: 14px; padding: 14px; background: var(--primary-soft); border: 1px solid #bfdbfe; border-radius: var(--radius-sm); }
+        .peer-box .head { font-size: .82rem; color: var(--primary-dark); font-weight: 700; margin-bottom: 9px; display: flex; align-items: center; gap: 6px; }
+        .peer-badges { display: flex; flex-wrap: wrap; gap: 7px; }
+        .peer-badge {
+            background: var(--surface); border: 1px solid #93c5fd; color: var(--primary-dark);
+            padding: 6px 12px; border-radius: 999px; font-size: .8rem; font-weight: 600; cursor: pointer; transition: .15s;
+        }
+        .peer-badge:hover { background: var(--primary); color: #fff; border-color: var(--primary); }
+
+        /* 등록 영역 (고정) */
+        .submit-bar {
+            position: fixed; left: 0; right: 0; bottom: 0; z-index: 40;
+            background: rgba(255, 255, 255, .92); backdrop-filter: blur(10px);
+            border-top: 1px solid var(--line); box-shadow: 0 -4px 20px rgba(15, 23, 42, .06);
+            transform: translateY(110%); transition: transform .25s ease;
+        }
+        .submit-bar.show { transform: none; }
+        .submit-inner { max-width: 960px; margin: 0 auto; padding: 12px 16px calc(12px + env(safe-area-inset-bottom)); display: flex; gap: 10px; align-items: center; }
+        .submit-inner .summary { font-size: .82rem; color: var(--muted); flex: 1; }
+        .submit-inner .summary b { color: var(--ink); }
+
+        /* ===== 관리자 ===== */
+        .admin-gallery { display: flex; gap: 10px; overflow-x: auto; padding: 4px 2px 10px; }
+        .admin-thumb {
+            position: relative; flex: none; width: 130px; height: 100px; border-radius: var(--radius-sm);
+            overflow: hidden; border: 1px solid var(--line); transition: opacity .2s;
+        }
+        .admin-thumb img { width: 100%; height: 100%; object-fit: cover; }
+        .admin-thumb .ctl { position: absolute; top: 4px; border: none; cursor: pointer; color: #fff; width: 26px; height: 26px; border-radius: 7px; font-size: .8rem; display: flex; align-items: center; justify-content: center; }
+        .admin-thumb .vis { left: 4px; background: rgba(71, 85, 105, .9); }
+        .admin-thumb .rm { right: 4px; background: rgba(239, 68, 68, .92); }
+
+        .toolbar {
+            display: flex; flex-wrap: wrap; gap: 8px; align-items: center;
+            background: #fffbeb; border: 1px solid #fde68a; border-radius: var(--radius-sm); padding: 12px; margin: 14px 0;
+        }
+        .toolbar .date-group { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+        .toolbar input[type="date"] { width: auto; padding: 8px 10px; font-size: .85rem; }
+        .spacer { flex: 1; }
+
+        .table-tools { display: flex; gap: 8px; align-items: center; margin-bottom: 10px; flex-wrap: wrap; }
+        .table-tools input[type="text"] { max-width: 260px; padding: 9px 12px; }
+
+        .table-scroll { overflow-x: auto; border: 1px solid var(--line); border-radius: var(--radius-sm); }
+        table { width: 100%; border-collapse: collapse; font-size: .86rem; }
+        thead th { background: var(--bg); color: var(--muted); font-weight: 700; font-size: .76rem; text-transform: none; padding: 11px 10px; text-align: left; white-space: nowrap; position: sticky; top: 0; }
+        tbody td { padding: 11px 10px; border-top: 1px solid var(--line); vertical-align: top; }
+        tbody tr:hover { background: var(--primary-soft); }
+        .thumb-img { width: 54px; height: 42px; object-fit: cover; border-radius: 6px; border: 1px solid var(--line); cursor: pointer; transition: border .15s; }
+        .thumb-img.filtered { border: 3px solid var(--danger); }
+        .icon-btn { border: none; background: transparent; cursor: pointer; font-size: 1rem; padding: 4px 6px; border-radius: 6px; color: var(--faint); }
+        .icon-btn:hover { background: #fee2e2; color: var(--danger); }
+
+        .count-bar { text-align: center; margin-top: 16px; color: var(--muted); font-size: .92rem; }
+        .count-bar b { color: var(--ink); }
+
+        /* ===== 모달 공통 ===== */
+        .overlay {
+            display: none; position: fixed; inset: 0; background: rgba(15, 23, 42, .55);
+            z-index: 1000; align-items: center; justify-content: center; padding: 16px;
+            animation: fade .15s ease;
+        }
+        .overlay.show { display: flex; }
+        .modal {
+            background: var(--surface); border-radius: var(--radius); width: 100%; max-width: 860px;
+            max-height: 88vh; overflow-y: auto; box-shadow: var(--shadow-lg);
+        }
+        .modal-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 18px 20px; border-bottom: 1px solid var(--line); position: sticky; top: 0; background: var(--surface); z-index: 2; }
+        .modal-head h2 { font-size: 1.1rem; }
+        .modal-x { border: none; background: var(--bg); width: 34px; height: 34px; border-radius: 9px; font-size: 1.2rem; cursor: pointer; color: var(--muted); }
+        .modal-x:hover { background: #fee2e2; color: var(--danger); }
+        .modal-body { padding: 20px; }
+        .modal-foot { padding: 14px 20px; border-top: 1px solid var(--line); display: flex; justify-content: flex-end; gap: 8px; position: sticky; bottom: 0; background: var(--surface); }
+
+        /* 핀 입력 바텀시트 */
+        .sheet-overlay { display: none; position: fixed; inset: 0; background: rgba(15, 23, 42, .5); z-index: 1100; align-items: flex-end; justify-content: center; }
+        .sheet-overlay.show { display: flex; animation: fade .15s ease; }
+        .sheet {
+            background: var(--surface); width: 100%; max-width: 560px;
+            border-radius: 18px 18px 0 0; padding: 20px 20px calc(20px + env(safe-area-inset-bottom));
+            box-shadow: var(--shadow-lg); animation: slideup .22s ease;
+        }
+        @media (min-width: 561px) { .sheet-overlay { align-items: center; } .sheet { border-radius: 18px; margin-bottom: 0; } }
+        @keyframes slideup { from { transform: translateY(100%); } to { transform: none; } }
+        .sheet h3 { font-size: 1.02rem; margin-bottom: 4px; display: flex; align-items: center; gap: 8px; }
+        .sheet .pin-num { width: 24px; height: 24px; border-radius: 50%; background: var(--danger); color: #fff; font-size: .8rem; display: inline-flex; align-items: center; justify-content: center; font-weight: 800; }
+        .sheet textarea { height: 92px; resize: none; margin: 12px 0; }
+        .sheet .row { display: flex; gap: 8px; }
+        .sheet .row .btn { flex: 1; }
+
+        /* AI 분석 결과 그룹 */
+        .loading-spin { width: 42px; height: 42px; border: 4px solid var(--line); border-top-color: var(--primary); border-radius: 50%; animation: spin 1s linear infinite; margin: 24px auto; }
+        @keyframes spin { to { transform: rotate(360deg); } }
+        .group-box { border: 1px solid var(--line); border-left: 5px solid var(--faint); border-radius: var(--radius-sm); padding: 14px; margin-bottom: 12px; background: var(--bg); }
+        .group-box.is-group { border-left-color: var(--primary); }
+        .group-tag { font-weight: 700; padding: 3px 9px; border-radius: 6px; color: #fff; font-size: .72rem; margin-right: 8px; }
+        .tag-group { background: var(--primary); }
+        .tag-single { background: var(--faint); }
+        .group-box ul { list-style: none; padding: 0; margin: 10px 0 0; min-height: 38px; }
+        .drag-item { background: var(--surface); border: 1px solid var(--line); border-radius: 7px; padding: 9px 11px; margin-bottom: 6px; cursor: grab; font-size: .88rem; user-select: none; }
+        .drag-item .who { color: var(--faint); font-size: .76rem; }
+        .drag-item.is-rep { background: #ecfdf5; border-color: #6ee7b7; }
+        .badge-rep { color: var(--success); font-weight: 800; font-size: .76rem; margin-right: 4px; }
+        .drag-over { background: var(--primary-soft) !important; outline: 2px dashed var(--primary); outline-offset: -2px; }
+
+        /* 토스트 */
+        #toast { position: fixed; left: 50%; bottom: 90px; transform: translateX(-50%) translateY(20px); background: var(--ink); color: #fff; padding: 13px 22px; border-radius: 999px; font-weight: 600; font-size: .92rem; box-shadow: var(--shadow-lg); z-index: 2000; opacity: 0; pointer-events: none; transition: opacity .3s, transform .3s; max-width: 90vw; text-align: center; }
+        #toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
+
+        /* 줌 뷰어 */
+        .zoom-overlay { display: none; position: fixed; inset: 0; background: rgba(0, 0, 0, .92); z-index: 1500; align-items: center; justify-content: center; touch-action: none; }
+        .zoom-overlay.show { display: flex; }
+        .zoom-overlay img { max-width: 100%; max-height: 100%; transform-origin: center; will-change: transform; }
+        .zoom-close { position: absolute; top: 16px; right: 16px; width: 44px; height: 44px; border-radius: 50%; border: none; background: rgba(255, 255, 255, .15); color: #fff; font-size: 1.4rem; cursor: pointer; z-index: 2; }
+        .zoom-tip { position: absolute; bottom: 24px; left: 50%; transform: translateX(-50%); color: rgba(255, 255, 255, .7); font-size: .82rem; }
+
+        .empty-state { text-align: center; color: var(--faint); padding: 40px 16px; }
+
+        /* 인쇄 (포스트잇) */
+        #printLayer { display: none; }
+        @media print {
+            @page { size: A4 landscape; margin: 10mm; }
+            body * { visibility: hidden; }
+            #printLayer, #printLayer * { visibility: visible; }
+            #printLayer { display: grid !important; position: absolute; top: 0; left: 0; width: 100%;
+                grid-template-columns: repeat(3, 1fr); grid-auto-rows: 80mm; gap: 5mm; }
+            .post-it { background: #fffb88 !important; border: 1px solid #eab308; padding: 10px; position: relative; overflow: hidden; display: flex; flex-direction: column; height: 80mm; break-inside: avoid; -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+            .post-it h3 { font-size: 14pt; border-bottom: 2px dashed #d97706; padding-bottom: 5px; margin: 0 0 6px; }
+            .post-it .body { flex: 1; font-size: 11pt; line-height: 1.35; word-break: break-all; z-index: 2; }
+            .post-it .img { position: absolute; right: 4px; bottom: 4px; width: 52%; height: 52%; opacity: .22; }
+            .post-it .img img { width: 100%; height: 100%; object-fit: contain; }
+            .print-report, .print-report * { visibility: visible; }
+            .print-report { position: absolute; top: 0; left: 0; width: 100%; }
+            .no-print { display: none !important; }
+        }
+    </style>
+</head>
+
+<body>
+    <!-- ===== 상단 바 ===== -->
+    <header class="topbar">
+        <div class="topbar-inner">
+            <div class="brand"><span class="dot"></span> 현장 위험요인 점검</div>
+            <div class="seg" id="modeSeg">
+                <button class="user active" data-mode="user">👤 분석자</button>
+                <button class="admin" data-mode="admin">🔐 관리자</button>
+            </div>
+        </div>
+    </header>
+
+    <div class="pwd-bar" id="pwdBar">
+        <div class="inner">
+            <input type="password" id="adminPwd" placeholder="관리자 암호"
+                onkeydown="if(event.key==='Enter') App.submitPwd()">
+            <button class="btn btn-admin btn-sm" onclick="App.submitPwd()">확인</button>
+        </div>
+    </div>
+
+    <main class="wrap">
+        <!-- ============ 분석자 화면 ============ -->
+        <section id="userView" class="view active">
+
+            <!-- 갤러리 -->
+            <div id="galleryView">
+                <div class="panel">
+                    <div style="display:flex; align-items:center; justify-content:space-between; gap:10px; flex-wrap:wrap;">
+                        <div>
+                            <h2 class="section-title">📷 점검할 현장 사진 선택</h2>
+                            <p class="section-sub">사진을 누르면 위험요인을 표시할 수 있어요.</p>
+                        </div>
+                        <div>
+                            <input type="file" id="userJsonLoad" hidden accept=".json">
+                            <button id="btnUserLoad" class="btn btn-ghost btn-sm"
+                                onclick="document.getElementById('userJsonLoad').click()">📂 저장한 점검 불러오기</button>
+                        </div>
+                    </div>
+                    <div id="userGallery" class="gallery-grid" style="margin-top:14px;">
+                        <div class="empty-state">사진을 불러오는 중…</div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- 작업 -->
+            <div id="workView" style="display:none;">
+                <div class="work-head">
+                    <button class="btn btn-ghost btn-sm" onclick="App.backToGallery()">← 사진 다시 선택</button>
+                    <button class="btn btn-ghost btn-sm" onclick="App.backupMine()" title="현재 입력을 파일로 저장 (나중에 불러와 수정 가능)">💾 내 점검 백업</button>
+                </div>
+
+                <div class="panel" style="padding:14px;">
+                    <div class="stage-wrap">
+                        <div class="stage" id="stage">
+                            <div class="stage-hint" id="stageHint">📍 위험한 곳을 눌러 표시하세요</div>
+                            <div class="stage-tools">
+                                <button onclick="App.openZoom()" title="크게 보기">🔍</button>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="quick-add">
+                        <input type="text" id="quickInput" placeholder="사진 없이 글로 추가 (예: 안전모 미착용)"
+                            onkeydown="if(event.key==='Enter') App.quickAdd()">
+                        <button class="btn btn-soft" onclick="App.quickAdd()">추가</button>
+                    </div>
+
+                    <ul id="issueList" class="issue-list"></ul>
+
+                    <div id="peerBox" class="peer-box" style="display:none;">
+                        <div class="head" id="peerHead">💡 다른 분석자들의 결과</div>
+                        <div id="peerBadges" class="peer-badges"></div>
+                    </div>
+                </div>
+
+                <div class="panel">
+                    <div class="grid-2">
+                        <div class="field">
+                            <label for="userName">이름</label>
+                            <input type="text" id="userName" placeholder="예: 홍길동">
+                        </div>
+                        <div class="field">
+                            <label for="userOrg">소속 / 회사</label>
+                            <input type="text" id="userOrg" placeholder="예: (주)XYZ">
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </section>
+
+        <!-- ============ 관리자 화면 ============ -->
+        <section id="adminView" class="view">
+            <div class="panel">
+                <div style="display:flex; align-items:center; justify-content:space-between;">
+                    <h2 class="section-title" style="color:var(--admin)">🛠️ 관리자 패널</h2>
+                    <button class="btn btn-ghost btn-sm" onclick="App.logoutAdmin()">로그아웃</button>
+                </div>
+            </div>
+
+            <div class="panel">
+                <h3 class="section-title">📸 점검 대상 사진</h3>
+                <p class="section-sub">여러 장 등록할 수 있어요. 👁️는 분석자 화면 노출, 🙈는 숨김입니다.</p>
+                <div id="adminGallery" class="admin-gallery">
+                    <div class="empty-state">불러오는 중…</div>
+                </div>
+                <input type="file" id="fileInput" hidden accept="image/*" multiple>
+                <button class="btn btn-admin" onclick="document.getElementById('fileInput').click()">➕ 사진 추가</button>
+            </div>
+
+            <div class="panel">
+                <h3 class="section-title">📋 분석 결과 관리</h3>
+                <div class="toolbar">
+                    <div class="date-group">
+                        <span style="font-size:.85rem; font-weight:600;">📅 기간</span>
+                        <input type="date" id="startDate" onchange="App.renderTable()"> ~
+                        <input type="date" id="endDate" onchange="App.renderTable()">
+                    </div>
+                    <div class="spacer"></div>
+                    <button class="btn btn-ghost btn-sm" onclick="App.selectAll(true)">전체선택</button>
+                    <button class="btn btn-ghost btn-sm" onclick="App.selectAll(false)">선택해제</button>
+                    <button id="analyzeBtn" class="btn btn-success btn-sm" onclick="App.analyze()" disabled>🤖 유사 항목 AI 분석</button>
+                    <input type="file" id="jsonLoader" hidden accept=".json">
+                    <button id="loadBtn" class="btn btn-ghost btn-sm" onclick="document.getElementById('jsonLoader').click()">분석결과 불러오기</button>
+                    <button id="reportBtn" class="btn btn-ghost btn-sm" style="display:none;" onclick="App.showReport()">재그룹 완료 자료</button>
+                    <button id="resetSimBtn" class="btn btn-ghost btn-sm" style="display:none;" onclick="App.resetReGroup()">재그룹 초기화</button>
+                </div>
+
+                <div class="table-tools">
+                    <input type="text" id="searchInput" placeholder="🔎 이름·소속·내용 검색" oninput="App.renderTable()">
+                    <span id="filterChip"></span>
+                </div>
+
+                <div class="table-scroll">
+                    <table id="adminTable">
+                        <thead>
+                            <tr>
+                                <th style="width:34px; text-align:center;">✓</th>
+                                <th style="width:120px;">날짜</th>
+                                <th style="width:72px;">이름</th>
+                                <th style="width:96px;">소속</th>
+                                <th style="width:64px; text-align:center;">사진</th>
+                                <th>문제점</th>
+                                <th style="width:36px;"></th>
+                            </tr>
+                        </thead>
+                        <tbody></tbody>
+                    </table>
+                </div>
+
+                <div class="count-bar" id="countBar">조회 건수: <b>0</b>개</div>
+                <button class="btn btn-primary btn-block" style="margin-top:12px;" onclick="App.printAll()">🖨️ 선택 항목 포스트잇 출력</button>
+            </div>
+        </section>
+    </main>
+
+    <!-- 등록 바 (작업 화면에서만) -->
+    <div class="submit-bar" id="submitBar">
+        <div class="submit-inner">
+            <div class="summary" id="submitSummary"></div>
+            <button class="btn btn-success" onclick="App.submitEntry()">✅ 등록하기</button>
+        </div>
+    </div>
+
+    <!-- 핀 입력 바텀시트 -->
+    <div class="sheet-overlay" id="pinSheet">
+        <div class="sheet">
+            <h3><span class="pin-num" id="sheetNum">+</span> <span id="sheetTitle">위험요인 입력</span></h3>
+            <p style="font-size:.8rem; color:var(--muted); margin:0;">예: 보호구 착용 불량, 정리정돈 미흡, 컨베이어 비상정지장치 미설치</p>
+            <textarea id="sheetText" placeholder="이곳의 문제점을 적어주세요"></textarea>
+            <div class="row">
+                <button class="btn btn-ghost" id="sheetDelBtn" onclick="App.deleteActivePin()" style="display:none; flex:none; color:var(--danger);">삭제</button>
+                <button class="btn btn-ghost" onclick="App.closeSheet()">취소</button>
+                <button class="btn btn-success" onclick="App.saveSheet()">저장</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- 동료 리뷰 모달 -->
+    <div class="overlay" id="peerModal">
+        <div class="modal" style="max-width:460px;">
+            <div class="modal-head"><h2 id="peerModalTitle">참고 자료</h2><button class="modal-x" onclick="App.closePeerModal()">×</button></div>
+            <div class="modal-body" id="peerModalBody"></div>
+        </div>
+    </div>
+
+    <!-- AI 분석 모달 -->
+    <div class="overlay" id="analysisModal">
+        <div class="modal">
+            <div class="modal-head">
+                <h2 id="modalTitle">🤖 유사 항목 분석 결과</h2>
+                <button class="modal-x" onclick="App.closeModal()">×</button>
+            </div>
+            <div class="modal-body" id="analysisBody"></div>
+            <div class="modal-foot no-print">
+                <button id="saveReGroupBtn" class="btn btn-primary" style="display:none;" onclick="App.saveReGrouped()">💾 재그룹 저장</button>
+                <button class="btn btn-ghost" onclick="App.closeModal()">닫기</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- 줌 뷰어 -->
+    <div class="zoom-overlay" id="zoomOverlay">
+        <button class="zoom-close" onclick="App.closeZoom()">×</button>
+        <img id="zoomImg" src="" alt="확대 보기">
+        <div class="zoom-tip">손가락으로 확대 / 드래그하여 이동</div>
+    </div>
+
+    <div id="printLayer"></div>
+    <div id="toast"></div>
+
+    <script>
+/* =========================================================
+   현장 위험요인 점검 · AI 분석   (app logic)
+   - Firebase 컬렉션/데이터 구조 100% 유지: inspections, site_photos, settings
+   - Gemini 분석 프롬프트 및 카테고리 사전 유지
+   - 개선: 모바일/PC 통합 핀 입력, 번호 매핑, 확대보기, 이름/소속 기억, 검색 등
+   ========================================================= */
+(function () {
+    "use strict";
+
+    /* ---------- 상태 ---------- */
+    let entryList = [];          // inspections 전체 (실시간)
+    let photoList = [];          // site_photos 전체 (실시간)
+    let currentPhoto = null;     // 현재 작업 중 사진(base64)
+    let issues = [];             // [{id, x, y, text, listOnly?}]
+    let isAdminAuth = false;
+    let isMobile = false;
+    let activePinId = null;      // 핀 시트 편집 대상
+    let filteredPhoto = null;    // 관리자 사진 필터
+    let savedReport = null;      // 재그룹 결과
+    let analyzedNames = "";
+
+    const LS = {
+        name: "inspector_name",
+        org: "inspector_org"
+    };
+
+    /* ---------- fs 준비 대기 ---------- */
+    function whenFsReady() {
+        return new Promise((resolve) => {
+            if (window.fs) return resolve();
+            window.addEventListener("fs-ready", () => resolve(), { once: true });
+            // 안전망: 일정 시간 후 폴링
+            let tries = 0;
+            const t = setInterval(() => {
+                if (window.fs) { clearInterval(t); resolve(); }
+                else if (++tries > 60) { clearInterval(t); resolve(); }
+            }, 100);
+        });
+    }
+
+    /* =========================================================
+       초기화
+       ========================================================= */
+    window.addEventListener("load", async () => {
+        isMobile = /android|iphone|ipad|ipod|blackberry|iemobile|opera mini/i.test(navigator.userAgent.toLowerCase())
+            || window.innerWidth <= 768;
+
+        // 저장된 이름/소속 복원
+        try {
+            document.getElementById("userName").value = localStorage.getItem(LS.name) || "";
+            document.getElementById("userOrg").value = localStorage.getItem(LS.org) || "";
+        } catch (e) { }
+
+        wireEvents();
+
+        await whenFsReady();
+        watchGallery();
+        watchData();
+    });
+
+    function wireEvents() {
+        // 모드 전환
+        document.getElementById("modeSeg").addEventListener("click", (e) => {
+            const btn = e.target.closest("button");
+            if (btn) switchMode(btn.dataset.mode);
+        });
+
+        // 사진 스테이지 클릭 → 핀
+        document.getElementById("stage").addEventListener("click", onStageClick);
+
+        // 이름/소속 입력 시 기억 + 동료 갱신
+        ["userName", "userOrg"].forEach((id) => {
+            document.getElementById(id).addEventListener("input", (e) => {
+                try { localStorage.setItem(id === "userName" ? LS.name : LS.org, e.target.value); } catch (_) { }
+                if (currentPhoto) loadPeerReviews(currentPhoto);
+                updateSubmitBar();
+            });
+        });
+
+        // 관리자 사진 업로드(다중)
+        document.getElementById("fileInput").addEventListener("change", onAdminUpload);
+        // 분석자 JSON 불러오기
+        document.getElementById("userJsonLoad").addEventListener("change", onUserJsonLoad);
+        // 관리자 분석결과 JSON 불러오기
+        document.getElementById("jsonLoader").addEventListener("change", onReportJsonLoad);
+
+        // 줌 제스처
+        setupZoom();
+    }
+
+    /* =========================================================
+       모드 전환 / 관리자 인증
+       ========================================================= */
+    function switchMode(mode) {
+        if (mode === "admin" && !isAdminAuth) {
+            const bar = document.getElementById("pwdBar");
+            const show = bar.style.display !== "block";
+            bar.style.display = show ? "block" : "none";
+            if (show) setTimeout(() => document.getElementById("adminPwd").focus(), 50);
+            return;
+        }
+        document.getElementById("pwdBar").style.display = "none";
+        document.querySelectorAll(".view").forEach((v) => v.classList.remove("active"));
+        document.querySelectorAll("#modeSeg button").forEach((b) => b.classList.remove("active"));
+
+        if (mode === "admin") {
+            document.getElementById("adminView").classList.add("active");
+            document.querySelector('#modeSeg [data-mode="admin"]').classList.add("active");
+            renderTable();
+            hideSubmitBar();
+        } else {
+            document.getElementById("userView").classList.add("active");
+            document.querySelector('#modeSeg [data-mode="user"]').classList.add("active");
+            updateSubmitBar();
+        }
+    }
+
+    function submitPwd() {
+        const input = document.getElementById("adminPwd");
+        if (input.value === window.ADMIN_PASSWORD) {
+            isAdminAuth = true;
+            input.value = "";
+            switchMode("admin");
+        } else {
+            showToast("🚫 암호가 올바르지 않습니다");
+            input.value = "";
+            input.focus();
+        }
+    }
+
+    async function logoutAdmin() {
+        if (await customConfirm("관리자 모드를 종료하고<br>분석자 화면으로 돌아갈까요?")) {
+            isAdminAuth = false;
+            switchMode("user");
+        }
+    }
+
+    /* =========================================================
+       실시간 동기화
+       ========================================================= */
+    function watchGallery() {
+        try {
+            const { db, collection, query, orderBy, onSnapshot } = window.fs;
+            const q = query(collection(db, "site_photos"), orderBy("timestamp", "desc"));
+            onSnapshot(q, (snap) => {
+                photoList = [];
+                snap.forEach((d) => photoList.push({ id: d.id, ...d.data() }));
+                renderUserGallery();
+                renderAdminGallery();
+            });
+        } catch (e) { console.error("갤러리 동기화 실패:", e); }
+    }
+
+    function watchData() {
+        try {
+            const { db, collection, query, orderBy, onSnapshot } = window.fs;
+            const q = query(collection(db, "inspections"), orderBy("timestamp", "desc"));
+            onSnapshot(q, (snap) => {
+                entryList = [];
+                snap.forEach((d) => entryList.push({ dbId: d.id, ...d.data() }));
+                renderTable();
+                renderUserGallery();
+                if (currentPhoto) loadPeerReviews(currentPhoto);
+            });
+        } catch (e) { console.error("데이터 동기화 실패:", e); }
+    }
+
+    /* =========================================================
+       분석자 — 갤러리
+       ========================================================= */
+    function renderUserGallery() {
+        const wrap = document.getElementById("userGallery");
+        const visible = photoList.filter((p) => !p.isHidden);
+        if (visible.length === 0) {
+            wrap.innerHTML = `<div class="empty-state">아직 등록된 점검 사진이 없습니다.<br>관리자가 사진을 추가하면 여기에 표시됩니다.</div>`;
+            return;
+        }
+        wrap.innerHTML = visible.map((p) => {
+            const cnt = entryList.filter((it) => it.photo === p.image).length;
+            const badge = cnt > 0 ? `<span class="reviewed-badge">분석 ${cnt}</span>` : `<span style="opacity:.85;">점검하기 →</span>`;
+            return `<div class="gallery-card" data-img="${esc(p.image)}">
+                        <img src="${p.image}" alt="현장 사진">
+                        <div class="meta"><span>현장</span>${badge}</div>
+                    </div>`;
+        }).join("");
+        wrap.querySelectorAll(".gallery-card").forEach((card) => {
+            card.addEventListener("click", () => selectPhoto(card.dataset.img));
+        });
+    }
+
+    function selectPhoto(src) {
+        currentPhoto = src;
+        issues = [];
+        document.getElementById("galleryView").style.display = "none";
+        document.getElementById("workView").style.display = "block";
+        renderStage();
+        renderIssueList();
+        loadPeerReviews(src);
+        updateSubmitBar();
+        window.scrollTo({ top: 0, behavior: "smooth" });
+    }
+
+    function backToGallery() {
+        document.getElementById("quickInput").value = "";
+        document.getElementById("workView").style.display = "none";
+        document.getElementById("galleryView").style.display = "block";
+        currentPhoto = null;
+        issues = [];
+        hideSubmitBar();
+    }
+
+    /* =========================================================
+       사진 스테이지 + 핀  (모바일/PC 통합)
+       ========================================================= */
+    function renderStage() {
+        const stage = document.getElementById("stage");
+        // 기존 이미지/핀 제거(도구·힌트는 유지)
+        stage.querySelectorAll("img, .pin").forEach((el) => el.remove());
+        const img = document.createElement("img");
+        img.src = currentPhoto;
+        img.alt = "현장 사진";
+        img.onload = renderPins;
+        stage.insertBefore(img, stage.firstChild);
+        if (img.complete) renderPins();
+        document.getElementById("stageHint").style.display = issues.some((i) => !i.listOnly) ? "none" : "flex";
+    }
+
+    function renderPins() {
+        const stage = document.getElementById("stage");
+        stage.querySelectorAll(".pin").forEach((el) => el.remove());
+        issues.forEach((it, idx) => {
+            if (it.listOnly) return;
+            const pin = document.createElement("div");
+            pin.className = "pin" + (it.id === activePinId ? " active" : "");
+            pin.style.left = it.x + "%";
+            pin.style.top = it.y + "%";
+            pin.innerHTML = `<div class="bub"><span class="num">${idx + 1}</span></div>`;
+            pin.title = it.text;
+            pin.addEventListener("click", (e) => { e.stopPropagation(); openSheet(it.id); });
+            stage.appendChild(pin);
+        });
+        document.getElementById("stageHint").style.display = issues.some((i) => !i.listOnly) ? "none" : "flex";
+    }
+
+    function onStageClick(e) {
+        if (e.target.closest(".pin") || e.target.closest(".stage-tools") || e.target.closest(".stage-hint")) return;
+        const img = document.querySelector("#stage img");
+        if (!img) return;
+        const rect = img.getBoundingClientRect();
+        const x = ((e.clientX - rect.left) / rect.width) * 100;
+        const y = ((e.clientY - rect.top) / rect.height) * 100;
+        if (x < 0 || x > 100 || y < 0 || y > 100) return;
+        openSheet(null, x, y);
+    }
+
+    /* 핀 입력 바텀시트 */
+    function openSheet(pinId, x, y) {
+        activePinId = pinId;
+        const numEl = document.getElementById("sheetNum");
+        const delBtn = document.getElementById("sheetDelBtn");
+        const text = document.getElementById("sheetText");
+
+        if (pinId) {
+            const it = issues.find((i) => i.id === pinId);
+            const idx = issues.indexOf(it);
+            numEl.textContent = idx + 1;
+            text.value = it ? it.text : "";
+            delBtn.style.display = "inline-flex";
+            document.getElementById("sheetTitle").textContent = "위험요인 수정";
+        } else {
+            numEl.textContent = "+";
+            text.value = "";
+            delBtn.style.display = "none";
+            document.getElementById("sheetTitle").textContent = "위험요인 입력";
+            // 새 핀 임시 좌표 보관
+            openSheet._pending = { x, y };
+        }
+        renderPins();
+        document.getElementById("pinSheet").classList.add("show");
+        setTimeout(() => text.focus(), 80);
+    }
+
+    function saveSheet() {
+        const val = document.getElementById("sheetText").value.trim().replace(/\r?\n/g, ", ");
+        if (!val) { showToast("내용을 입력해 주세요"); return; }
+        if (activePinId) {
+            const it = issues.find((i) => i.id === activePinId);
+            if (it) it.text = val;
+        } else {
+            const p = openSheet._pending || { x: 50, y: 50 };
+            issues.push({ id: Date.now(), x: p.x, y: p.y, text: val });
+            openSheet._pending = null;
+        }
+        closeSheet();
+        renderPins();
+        renderIssueList();
+        updateSubmitBar();
+    }
+
+    function deleteActivePin() {
+        if (!activePinId) return;
+        issues = issues.filter((i) => i.id !== activePinId);
+        closeSheet();
+        renderPins();
+        renderIssueList();
+        updateSubmitBar();
+    }
+
+    function closeSheet() {
+        activePinId = null;
+        document.getElementById("pinSheet").classList.remove("show");
+        renderPins();
+    }
+
+    /* 글로만 추가 (사진 클릭 없이) */
+    function quickAdd() {
+        const input = document.getElementById("quickInput");
+        const val = input.value.trim();
+        if (!val) return;
+        issues.push({ id: Date.now(), x: 50, y: 50, text: val, listOnly: true });
+        input.value = "";
+        renderIssueList();
+        updateSubmitBar();
+    }
+
+    /* 문제점 리스트 */
+    function renderIssueList() {
+        const list = document.getElementById("issueList");
+        if (issues.length === 0) {
+            list.innerHTML = `<li class="issue-empty">표시한 위험요인이 여기에 번호와 함께 정리됩니다.</li>`;
+            return;
+        }
+        list.innerHTML = "";
+        issues.forEach((it, idx) => {
+            const li = document.createElement("li");
+            li.className = "issue-item";
+            li.innerHTML = `<span class="idx">${idx + 1}</span>
+                            <span class="txt">${esc(it.text)}${it.listOnly ? ' <span style="color:var(--faint); font-size:.78rem;">(글)</span>' : ''}</span>
+                            <button class="del" title="삭제">×</button>`;
+            li.querySelector(".txt").addEventListener("click", () => { if (!it.listOnly) scrollToPin(it.id); openSheet(it.id); });
+            li.querySelector(".del").addEventListener("click", () => {
+                issues = issues.filter((x) => x.id !== it.id);
+                renderPins(); renderIssueList(); updateSubmitBar();
+            });
+            list.appendChild(li);
+        });
+    }
+
+    function scrollToPin(id) {
+        activePinId = id;
+        renderPins();
+    }
+
+    /* 등록 바 */
+    function updateSubmitBar() {
+        if (!currentPhoto) { hideSubmitBar(); return; }
+        const name = document.getElementById("userName").value.trim();
+        const n = issues.length;
+        document.getElementById("submitSummary").innerHTML =
+            `위험요인 <b>${n}개</b> 표시${name ? ` · ${esc(name)}` : ' · <span style="color:var(--danger)">이름을 입력하세요</span>'}`;
+        document.getElementById("submitBar").classList.add("show");
+    }
+    function hideSubmitBar() { document.getElementById("submitBar").classList.remove("show"); }
+
+    /* =========================================================
+       동료(타 분석자) 결과
+       ========================================================= */
+    function loadPeerReviews(imageSrc) {
+        const box = document.getElementById("peerBox");
+        const badges = document.getElementById("peerBadges");
+        const head = document.getElementById("peerHead");
+        const myName = document.getElementById("userName").value.trim();
+        const myOrg = document.getElementById("userOrg").value.trim();
+
+        const peers = entryList
+            .filter((it) => it.photo === imageSrc)
+            .filter((it) => !(it.name === myName && it.org === myOrg));
+
+        if (peers.length === 0) { box.style.display = "none"; return; }
+
+        box.style.display = "block";
+        head.innerHTML = `💡 다른 분석자들의 결과 <b style="color:var(--primary)">${peers.length}건</b> · 눌러서 참고`;
+        badges.innerHTML = "";
+        peers.forEach((data, i) => {
+            const b = document.createElement("span");
+            b.className = "peer-badge";
+            b.textContent = `👤 분석자 ${i + 1}`;
+            b.addEventListener("click", () => showPeerModal(data, `분석자 ${i + 1}`));
+            badges.appendChild(b);
+        });
+    }
+
+    function showPeerModal(data, alias) {
+        document.getElementById("peerModalTitle").textContent = `${alias}의 지적 사항`;
+        const body = document.getElementById("peerModalBody");
+        body.innerHTML = `<ol style="padding-left:20px; margin:0; line-height:1.8;">${(data.issues || []).map((s) => `<li>${esc(s)}</li>`).join("")}</ol>`;
+        document.getElementById("peerModal").classList.add("show");
+    }
+    function closePeerModal() { document.getElementById("peerModal").classList.remove("show"); }
+
+    /* =========================================================
+       등록 (Firebase 저장 — 구조 유지)
+       ========================================================= */
+    async function submitEntry() {
+        const nameEl = document.getElementById("userName");
+        const orgEl = document.getElementById("userOrg");
+        const name = nameEl.value.trim();
+        const org = orgEl.value.trim();
+
+        if (!name) { showToast("이름을 입력해 주세요"); nameEl.focus(); return; }
+        if (issues.length === 0) { showToast("위험요인을 1개 이상 표시해 주세요"); return; }
+
+        try {
+            localStorage.setItem(LS.name, name);
+            localStorage.setItem(LS.org, org);
+        } catch (_) { }
+
+        const dup = entryList.find((it) => it.name === name && it.org === org && it.photo === currentPhoto);
+
+        const entry = {
+            id: Date.now(),
+            timestamp: Date.now(),
+            name, org,
+            issues: issues.map((p) => p.text),
+            pins: issues.map((p) => ({ id: p.id, x: p.x, y: p.y, text: p.text, listOnly: !!p.listOnly })),
+            photo: currentPhoto
+        };
+
+        let targetDbId = null;
+        if (dup) {
+            if (!await customConfirm("이미 등록한 사진입니다.<br>기존 내용을 덮어쓸까요?")) return;
+            targetDbId = dup.dbId;
+            entry.id = dup.id;
+        }
+
+        showToast("⏳ 저장 중…");
+        try {
+            const { db, collection, addDoc, doc, setDoc } = window.fs;
+            if (targetDbId) await setDoc(doc(db, "inspections", targetDbId), entry);
+            else await addDoc(collection(db, "inspections"), entry);
+
+            showToast(dup ? "♻️ 내용을 수정했습니다" : "✅ 등록을 완료했습니다");
+            // 입력 초기화 후 갤러리로
+            issues = [];
+            document.getElementById("quickInput").value = "";
+            backToGallery();
+        } catch (e) {
+            console.error(e);
+            showToast("❌ 저장 실패: " + e.message);
+        }
+    }
+
+    /* 내 점검 백업(JSON) 저장 — 나중에 불러와 수정 가능 */
+    function backupMine() {
+        if (!currentPhoto || issues.length === 0) { showToast("표시한 위험요인이 없습니다"); return; }
+        const name = document.getElementById("userName").value.trim() || "무명";
+        const packet = {
+            id: Date.now(), timestamp: Date.now(),
+            name, org: document.getElementById("userOrg").value.trim(),
+            issues: issues.map((p) => p.text),
+            pins: issues.map((p) => ({ id: p.id, x: p.x, y: p.y, text: p.text, listOnly: !!p.listOnly })),
+            photo: currentPhoto
+        };
+        download(`안전점검_${name}_${stamp()}.json`, JSON.stringify(packet, null, 2));
+        showToast("💾 백업 파일을 저장했습니다");
+    }
+
+    function onUserJsonLoad(e) {
+        const file = e.target.files[0];
+        if (!file) return;
+        const reader = new FileReader();
+        reader.onload = (evt) => {
+            try {
+                const data = JSON.parse(evt.target.result);
+                if (!data.photo || typeof data.photo !== "string") { showToast("⛔ 사진 데이터가 없는 파일입니다"); e.target.value = ""; return; }
+                if (!data.pins || !Array.isArray(data.pins)) { showToast("⛔ 위험요인 정보가 없는 파일입니다"); e.target.value = ""; return; }
+                currentPhoto = data.photo;
+                document.getElementById("userName").value = data.name || data.userName || "";
+                document.getElementById("userOrg").value = data.org || data.userOrg || "";
+                issues = (data.pins || []).map((p) => ({
+                    id: p.id || Date.now() + Math.random(),
+                    x: p.x ?? 50, y: p.y ?? 50, text: p.text, listOnly: !!p.listOnly
+                }));
+                document.getElementById("galleryView").style.display = "none";
+                document.getElementById("workView").style.display = "block";
+                renderStage(); renderIssueList(); loadPeerReviews(currentPhoto); updateSubmitBar();
+                showToast("📂 점검 파일을 불러왔습니다");
+            } catch (err) {
+                console.error(err);
+                showToast("❌ 파일을 읽을 수 없습니다 (JSON 형식 확인)");
+            }
+        };
+        reader.readAsText(file);
+        e.target.value = "";
+    }
+
+    /* =========================================================
+       관리자 — 사진 관리
+       ========================================================= */
+    function renderAdminGallery() {
+        const wrap = document.getElementById("adminGallery");
+        if (photoList.length === 0) {
+            wrap.innerHTML = `<div class="empty-state" style="width:100%;">등록된 사진이 없습니다. 아래 버튼으로 추가하세요.</div>`;
+            return;
+        }
+        wrap.innerHTML = photoList.map((p) => {
+            const hidden = !!p.isHidden;
+            return `<div class="admin-thumb" style="opacity:${hidden ? .35 : 1}">
+                        <img src="${p.image}" alt="현장 사진">
+                        <button class="ctl vis" data-id="${p.id}" data-hidden="${hidden}" title="노출/숨김">${hidden ? "🙈" : "👁️"}</button>
+                        <button class="ctl rm" data-rm="${p.id}" title="삭제">×</button>
+                    </div>`;
+        }).join("");
+        wrap.querySelectorAll(".vis").forEach((b) =>
+            b.addEventListener("click", () => togglePhoto(b.dataset.id, b.dataset.hidden === "true")));
+        wrap.querySelectorAll(".rm").forEach((b) =>
+            b.addEventListener("click", () => deletePhoto(b.dataset.rm)));
+    }
+
+    async function onAdminUpload(e) {
+        const files = Array.from(e.target.files || []);
+        if (files.length === 0) return;
+        showToast(`⏳ 사진 ${files.length}장 처리 중…`);
+        for (const file of files) {
+            await new Promise((resolve) => {
+                const reader = new FileReader();
+                reader.onload = async (evt) => {
+                    const compressed = await compressImage(evt.target.result, 0.4, 600);
+                    await addPhotoToDB(compressed);
+                    resolve();
+                };
+                reader.readAsDataURL(file);
+            });
+        }
+        showToast(`📸 사진 ${files.length}장을 추가했습니다`);
+        e.target.value = "";
+    }
+
+    async function addPhotoToDB(base64) {
+        try {
+            const { db, collection, addDoc } = window.fs;
+            await addDoc(collection(db, "site_photos"), { image: base64, timestamp: Date.now() });
+        } catch (e) { showToast("⚠️ 사진 저장 실패: " + e.message); }
+    }
+
+    async function deletePhoto(id) {
+        if (!await customConfirm("이 사진을 삭제할까요?<br>삭제 후 복구할 수 없습니다.")) return;
+        try {
+            const { db, doc, deleteDoc } = window.fs;
+            await deleteDoc(doc(db, "site_photos", id));
+            showToast("🗑️ 사진을 삭제했습니다");
+        } catch (e) { showToast("삭제 실패: " + e.message); }
+    }
+
+    async function togglePhoto(id, hidden) {
+        try {
+            const { db, doc, updateDoc } = window.fs;
+            await updateDoc(doc(db, "site_photos", id), { isHidden: !hidden });
+            showToast(hidden ? "👁️ 분석자 화면에 다시 표시합니다" : "🙈 분석자 화면에서 숨겼습니다");
+        } catch (e) { showToast("변경 실패: " + e.message); }
+    }
+
+    /* =========================================================
+       관리자 — 표 / 필터 / 검색
+       ========================================================= */
+    function renderTable() {
+        const start = val("startDate");
+        const end = val("endDate");
+        const kw = val("searchInput").trim().toLowerCase();
+
+        const rows = entryList.filter((it) => {
+            if (!it.timestamp || isNaN(new Date(it.timestamp).getTime())) return false;
+            const d = new Date(it.timestamp).toISOString().split("T")[0];
+            const dateOk = (!start || d >= start) && (!end || d <= end);
+            const photoOk = filteredPhoto ? it.photo === filteredPhoto : true;
+            const kwOk = !kw || [it.name, it.org, (it.issues || []).join(" ")].join(" ").toLowerCase().includes(kw);
+            return dateOk && photoOk && kwOk;
+        });
+
+        const tbody = document.querySelector("#adminTable tbody");
+        if (rows.length === 0) {
+            tbody.innerHTML = `<tr><td colspan="7"><div class="empty-state">조건에 맞는 분석 결과가 없습니다.</div></td></tr>`;
+        } else {
+            tbody.innerHTML = rows.map((it) => {
+                const selected = it.photo === filteredPhoto;
+                return `<tr>
+                    <td style="text-align:center;"><input type="checkbox" class="row-check" data-id="${it.id}"></td>
+                    <td>${new Date(it.timestamp).toLocaleString("ko-KR", { dateStyle: "short", timeStyle: "short" })}</td>
+                    <td>${esc(it.name)}</td>
+                    <td>${esc(it.org || "")}</td>
+                    <td style="text-align:center;">
+                        <img src="${it.photo}" class="thumb-img ${selected ? "filtered" : ""}" data-img="${esc(it.photo)}" title="같은 사진끼리 모아보기">
+                    </td>
+                    <td>${(it.issues || []).map((s) => esc(s)).join("<br>")}</td>
+                    <td><button class="icon-btn" data-del="${it.id}" title="삭제">⛔</button></td>
+                </tr>`;
+            }).join("");
+            tbody.querySelectorAll(".row-check").forEach((c) => c.addEventListener("change", updateCounter));
+            tbody.querySelectorAll(".thumb-img").forEach((im) => im.addEventListener("click", () => filterByPhoto(im.dataset.img)));
+            tbody.querySelectorAll("[data-del]").forEach((b) => b.addEventListener("click", () => deleteItem(Number(b.dataset.del))));
+        }
+        updateCounter();
+        renderFilterChip();
+    }
+
+    function renderFilterChip() {
+        const chip = document.getElementById("filterChip");
+        if (filteredPhoto) {
+            chip.innerHTML = `<button class="btn btn-soft btn-sm" onclick="App.clearFilter()">🔍 사진 필터 해제</button>`;
+        } else chip.innerHTML = "";
+    }
+
+    function updateCounter() {
+        const total = document.querySelectorAll("#adminTable tbody tr").length
+            - (document.querySelector("#adminTable .empty-state") ? 1 : 0);
+        const checked = document.querySelectorAll(".row-check:checked").length;
+        const btn = document.getElementById("analyzeBtn");
+        btn.disabled = checked < 2;
+        document.getElementById("countBar").innerHTML = `조회 건수: <b>${total < 0 ? 0 : total}</b>개 · 선택: <b>${checked}</b>개`;
+    }
+
+    function selectAll(bool) {
+        document.querySelectorAll(".row-check").forEach((c) => (c.checked = bool));
+        updateCounter();
+    }
+
+    function filterByPhoto(src) {
+        filteredPhoto = filteredPhoto === src ? null : src;
+        showToast(filteredPhoto ? "🔍 같은 사진 항목만 표시합니다" : "🔄 전체 목록을 표시합니다");
+        renderTable();
+    }
+    function clearFilter() { filteredPhoto = null; renderTable(); }
+
+    async function deleteItem(id) {
+        if (!await customConfirm("이 항목을 삭제할까요?<br>복구할 수 없습니다.")) return;
+        const target = entryList.find((it) => it.id === id);
+        if (!target || !target.dbId) { showToast("항목을 찾을 수 없습니다"); return; }
+        try {
+            const { db, doc, deleteDoc } = window.fs;
+            await deleteDoc(doc(db, "inspections", target.dbId));
+            showToast("🗑️ 삭제했습니다");
+        } catch (e) { showToast("삭제 실패: " + e.message); }
+    }
+
+    /* 포스트잇 인쇄 */
+    function printAll() {
+        const ids = Array.from(document.querySelectorAll(".row-check:checked")).map((c) => Number(c.dataset.id));
+        if (ids.length === 0) { showToast("출력할 항목을 선택하세요"); return; }
+        const targets = entryList.filter((i) => ids.includes(i.id));
+        document.getElementById("printLayer").innerHTML = targets.map((e) => `
+            <div class="post-it">
+                <h3>${esc(e.name)} (${esc(e.org || "")})</h3>
+                <div class="body">${(e.issues || []).map((s) => `· ${esc(s)}`).join("<br>")}</div>
+                <div class="img"><img src="${e.photo}"></div>
+            </div>`).join("");
+        window.print();
+    }
+
+    /* =========================================================
+       AI 분석 (Gemini) — 프롬프트/카테고리 유지
+       ========================================================= */
+    async function analyze() {
+        const ids = Array.from(document.querySelectorAll(".row-check:checked")).map((c) => Number(c.dataset.id));
+        const selected = entryList.filter((it) => ids.includes(it.id));
+        if (selected.length < 2) { showToast("⚠️ 최소 2개 이상 선택하세요"); return; }
+
+        analyzedNames = [...new Set(selected.map((it) => it.name))].join(", ") + "님께서 찾으신 문제점입니다.";
+        document.getElementById("modalTitle").textContent = "🛡️ AI 안전 전문가 분석 결과";
+        document.getElementById("analysisModal").classList.add("show");
+        document.getElementById("analysisBody").innerHTML = `
+            <div style="text-align:center; padding:30px;">
+                <div class="loading-spin"></div>
+                <h3 style="color:var(--primary);">AI가 안전보건 기준표로 분석 중입니다…</h3>
+                <p style="color:var(--muted);">부정어(미착용/X)·현장 용어·오타를 보정해 하나로 통합합니다.</p>
+            </div>`;
+
+        try {
+            let flattened = [];
+            selected.forEach((s) => (s.issues || []).forEach((txt) => {
+                txt.split(",").map((t) => t.trim()).filter(Boolean).forEach((t) => flattened.push({ text: t, name: s.name }));
+            }));
+            const categories = getCategories();
+            const grouped = await analyzeWithGemini(flattened, categories);
+            renderGroupEditor(grouped);
+        } catch (e) {
+            console.error(e);
+            document.getElementById("analysisBody").innerHTML =
+                `<div style="color:var(--danger); text-align:center; padding:20px;"><b>💥 분석 오류</b><br>${esc(e.message)}</div>`;
+        }
+    }
+
+    async function analyzeWithGemini(issuesArr, categories) {
+        const { GoogleGenerativeAI } = await import("https://esm.run/@google/generative-ai");
+        const genAI = new GoogleGenerativeAI(window.GEMINI_API_KEY);
+        const model = genAI.getGenerativeModel({ model: "gemini-3-flash-preview" });
+
+        const prompt = `
+당신은 건설 현장의 최고 안전보건 전문가입니다.
+아래 제공되는 [기준 카테고리]를 "법전"처럼 참고하여, [지적 사항들]을 가장 적합한 카테고리로 그룹화해 주세요.
+
+[지시사항]
+1. **부정어 처리**: '미착용', '안 함', 'X', '없음', '불량' 등이 문맥상 부정을 의미하면 해당 위반 항목으로 분류하세요. (예: "안전모 착용 X" -> 보호구 위반)
+2. **유사어 통합**: 사투리, 현장 은어, 오타가 있어도 [기준 카테고리]의 표준 용어와 연결하세요. (예: "하이바" -> 안전모 -> 보호구/PPE)
+3. **그룹화**: 같은 의미의 지적 사항끼리 묶고, 그룹의 대표 명칭(category)은 [기준 카테고리]의 대분류 이름을 사용하세요.
+4. **출력 형식**: 반드시 아래와 같은 JSON 배열 형식으로만 출력하세요. (Markdown 코드 블록 없이 순수 JSON만)
+
+[출력 예시]
+[
+    {
+        "category": "보호구/PPE",
+        "representative_text": "안전모 미착용 (통합)",
+        "members": [
+            {"text": "하이바 안씀", "name": "홍길동"},
+            {"text": "안전모 미착용", "name": "김반장"}
+        ]
+    }
+]
+
+[기준 카테고리 (참고서)]
+${JSON.stringify(categories)}
+
+[지적 사항들 (분석 대상)]
+${JSON.stringify(issuesArr)}
+`;
+        try {
+            const result = await model.generateContent(prompt);
+            let text = (await result.response).text();
+            text = text.replace(/```json/g, "").replace(/```/g, "").trim();
+            return JSON.parse(text);
+        } catch (err) {
+            console.error("AI 응답 파싱 실패:", err);
+            throw new Error("AI 분석 결과를 처리하지 못했습니다. 다시 시도해 주세요.");
+        }
+    }
+
+    function renderGroupEditor(groups) {
+        const body = document.getElementById("analysisBody");
+        document.getElementById("saveReGroupBtn").style.display = "inline-flex";
+        if (!groups || groups.length === 0) {
+            body.innerHTML = `<p style="text-align:center; padding:20px;">분석된 결과가 없습니다.</p>`;
+            return;
+        }
+        body.innerHTML = `<p style="font-size:.82rem; color:var(--muted); margin:0 0 14px;">💡 항목을 드래그해 그룹을 옮기고, 더블클릭하면 대표 항목으로 지정됩니다.</p>`;
+        groups.forEach((g, idx) => {
+            const isGroup = g.members.length > 1;
+            const repText = g.representative_text || g.members[0].text;
+            let items = `<li id="it-${idx}-rep" class="drag-item is-rep" draggable="true" data-text="${esc(repText)}" data-name="AI추천">
+                            <span class="badge-rep">[통합]</span>${esc(repText)}</li>`;
+            g.members.forEach((m, mi) => {
+                items += `<li id="it-${idx}-${mi}" class="drag-item" draggable="true" data-text="${esc(m.text)}" data-name="${esc(m.name)}">
+                            <span class="who">(${esc(m.name)})</span> ${esc(m.text)}</li>`;
+            });
+            body.insertAdjacentHTML("beforeend", `
+                <div class="group-box ${isGroup ? "is-group" : ""}">
+                    <div style="border-bottom:1px solid var(--line); padding-bottom:7px;">
+                        <span class="group-tag ${isGroup ? "tag-group" : "tag-single"}">${esc(g.category)}</span>
+                        <strong class="kw">${esc(g.category)} 위반 그룹</strong>
+                    </div>
+                    <ul>${items}</ul>
+                </div>`);
+        });
+        bindDnD();
+    }
+
+    /* 드래그앤드롭 */
+    function bindDnD() {
+        const body = document.getElementById("analysisBody");
+        body.querySelectorAll(".drag-item").forEach((li) => {
+            li.addEventListener("dragstart", (e) => e.dataTransfer.setData("text", li.id));
+            li.addEventListener("dblclick", () => setRep(li));
+        });
+        body.querySelectorAll(".group-box ul").forEach((ul) => {
+            ul.addEventListener("dragover", (e) => { e.preventDefault(); ul.classList.add("drag-over"); });
+            ul.addEventListener("dragleave", () => ul.classList.remove("drag-over"));
+            ul.addEventListener("drop", (e) => {
+                e.preventDefault();
+                ul.classList.remove("drag-over");
+                const dragged = document.getElementById(e.dataTransfer.getData("text"));
+                if (!dragged) return;
+                const sourceBox = dragged.closest(".group-box");
+                ul.appendChild(dragged);
+                if (dragged.classList.contains("is-rep")) {
+                    dragged.classList.remove("is-rep");
+                    dragged.querySelector(".badge-rep")?.remove();
+                }
+                updateGroupStatus(ul.closest(".group-box"));
+                if (sourceBox) updateGroupStatus(sourceBox);
+            });
+        });
+    }
+
+    function updateGroupStatus(box) {
+        const items = box.querySelectorAll("li");
+        if (items.length === 0) { box.remove(); return; }
+        const isGroup = items.length > 1;
+        box.className = `group-box ${isGroup ? "is-group" : ""}`;
+        const tag = box.querySelector(".group-tag");
+        tag.className = `group-tag ${isGroup ? "tag-group" : "tag-single"}`;
+        tag.textContent = isGroup ? "그룹" : "개별";
+        if (!box.querySelector(".is-rep")) setRep(items[0]);
+    }
+
+    function setRep(el) {
+        const ul = el.parentElement;
+        ul.querySelectorAll(".is-rep").forEach((li) => { li.classList.remove("is-rep"); li.querySelector(".badge-rep")?.remove(); });
+        el.classList.add("is-rep");
+        el.insertAdjacentHTML("afterbegin", '<span class="badge-rep">[기준] </span>');
+        ul.closest(".group-box").querySelector(".kw").textContent = el.getAttribute("data-text");
+    }
+
+    /* 재그룹 저장 / 보고서 */
+    function saveReGrouped() {
+        const boxes = document.querySelectorAll(".group-box");
+        const total = Array.from(boxes).reduce((a, b) => a + b.querySelectorAll("li").length, 0);
+        savedReport = Array.from(boxes).map((box) => {
+            const items = Array.from(box.querySelectorAll("li"));
+            return {
+                type: box.querySelector(".group-tag").textContent,
+                keyword: box.querySelector(".kw").textContent,
+                content: items.map((li) => `- ${li.getAttribute("data-text")}`).join("<br>"),
+                rawItems: items.map((li) => ({ text: li.getAttribute("data-text"), name: li.getAttribute("data-name") })),
+                ratio: ((items.length / total) * 100).toFixed(1) + "%"
+            };
+        });
+        download(`유사도 재그룹 결과_${stamp()}.json`, JSON.stringify({ report: savedReport, names: analyzedNames || "저장된 분석 결과" }, null, 2));
+        document.getElementById("analyzeBtn").style.display = "none";
+        document.getElementById("reportBtn").style.display = "inline-flex";
+        document.getElementById("resetSimBtn").style.display = "inline-flex";
+        showToast("💾 재그룹 결과를 저장했습니다");
+        showReport();
+    }
+
+    function showReport() {
+        if (!savedReport) return;
+        document.getElementById("modalTitle").textContent = "📋 최종 안전보건 재그룹 보고서";
+        document.getElementById("saveReGroupBtn").style.display = "none";
+        document.getElementById("analysisModal").classList.add("show");
+        const header = `<div class="print-report"><div style="text-align:center; margin-bottom:18px; padding-bottom:10px; border-bottom:2px solid #333;">
+                <h1 style="font-size:22pt;">선택 항목 문제점 그룹화 결과</h1>
+                <p style="margin-top:8px; color:#555;">${esc(analyzedNames)}</p></div>`;
+        const table = `<table style="font-size:.9rem;">
+                <thead><tr>
+                    <th style="width:34%; text-align:center;">핵심키워드</th>
+                    <th style="text-align:center;">구성 내용</th>
+                    <th style="width:10%; text-align:center;">비율</th></tr></thead>
+                <tbody>${savedReport.map((r) => `<tr>
+                    <td style="font-weight:700; text-align:center;">${esc(r.keyword)}</td>
+                    <td style="color:#555; line-height:1.6;">${r.content}</td>
+                    <td style="font-weight:700; color:var(--primary); text-align:center;">${r.ratio}</td>
+                </tr>`).join("")}</tbody></table></div>
+                <div class="no-print" style="margin-top:16px; display:flex; justify-content:center; gap:8px;">
+                    <button class="btn btn-ghost" onclick="App.modifyReGroup()">✏️ 재그룹 수정</button>
+                    <button class="btn btn-primary" onclick="window.print()">🖨️ 보고서 인쇄</button>
+                </div>`;
+        document.getElementById("analysisBody").innerHTML = header + table;
+    }
+
+    function modifyReGroup() {
+        if (!savedReport) return;
+        document.getElementById("modalTitle").textContent = "🤖 유사 항목 분석 결과";
+        document.getElementById("saveReGroupBtn").style.display = "inline-flex";
+        const body = document.getElementById("analysisBody");
+        body.innerHTML = `<p style="font-size:.82rem; color:var(--muted); margin:0 0 14px;">💡 드래그로 이동, 더블클릭으로 대표 항목 지정.</p>`;
+        savedReport.forEach((report, idx) => {
+            const isGroup = report.type === "그룹";
+            const lines = report.content.split("<br>").map((s) => s.replace(/^- /, ""));
+            const items = lines.map((txt, mi) => {
+                const first = mi === 0;
+                return `<li id="edit-${idx}-${mi}" class="drag-item ${first ? "is-rep" : ""}" draggable="true" data-text="${esc(txt)}">
+                            ${first ? '<span class="badge-rep">[기준] </span>' : ""}${esc(txt)}</li>`;
+            }).join("");
+            body.insertAdjacentHTML("beforeend", `
+                <div class="group-box ${isGroup ? "is-group" : ""}">
+                    <div style="border-bottom:1px solid var(--line); padding-bottom:7px;">
+                        <span class="group-tag ${isGroup ? "tag-group" : "tag-single"}">${esc(report.type)}</span>
+                        <strong class="kw">${esc(report.keyword)}</strong>
+                    </div>
+                    <ul>${items}</ul>
+                </div>`);
+        });
+        bindDnD();
+    }
+
+    async function resetReGroup() {
+        if (!await customConfirm("저장된 재그룹 자료를 지우고<br>초기화할까요?")) return;
+        savedReport = null;
+        document.getElementById("analyzeBtn").style.display = "inline-flex";
+        document.getElementById("reportBtn").style.display = "none";
+        document.getElementById("resetSimBtn").style.display = "none";
+        closeModal();
+    }
+
+    function onReportJsonLoad(e) {
+        const file = e.target.files[0];
+        if (!file) return;
+        const reader = new FileReader();
+        reader.onload = (evt) => {
+            try {
+                const loaded = JSON.parse(evt.target.result);
+                if (loaded.report && loaded.names) { savedReport = loaded.report; analyzedNames = loaded.names; }
+                else if (Array.isArray(loaded)) { savedReport = loaded; analyzedNames = "불러온 데이터 분석 결과"; }
+                else throw new Error("지원하지 않는 파일 형식입니다.");
+                document.getElementById("analyzeBtn").style.display = "none";
+                document.getElementById("reportBtn").style.display = "inline-flex";
+                document.getElementById("resetSimBtn").style.display = "inline-flex";
+                showToast("분석 결과를 불러왔습니다");
+                showReport();
+            } catch (err) { showToast("파일 읽기 오류: " + err.message); }
+        };
+        reader.readAsText(file);
+        e.target.value = "";
+    }
+
+    function closeModal() { document.getElementById("analysisModal").classList.remove("show"); }
+
+    /* =========================================================
+       확대 보기 (핀치 줌 / 드래그)
+       ========================================================= */
+    let zoomState = { scale: 1, x: 0, y: 0, startDist: 0, startScale: 1, dragging: false, sx: 0, sy: 0, ox: 0, oy: 0 };
+    function openZoom() {
+        if (!currentPhoto) return;
+        const img = document.getElementById("zoomImg");
+        img.src = currentPhoto;
+        zoomState = { scale: 1, x: 0, y: 0, startDist: 0, startScale: 1, dragging: false, sx: 0, sy: 0, ox: 0, oy: 0 };
+        applyZoom();
+        document.getElementById("zoomOverlay").classList.add("show");
+    }
+    function closeZoom() { document.getElementById("zoomOverlay").classList.remove("show"); }
+    function applyZoom() {
+        document.getElementById("zoomImg").style.transform =
+            `translate(${zoomState.x}px, ${zoomState.y}px) scale(${zoomState.scale})`;
+    }
+    function setupZoom() {
+        const overlay = document.getElementById("zoomOverlay");
+        const img = document.getElementById("zoomImg");
+        const dist = (t) => Math.hypot(t[0].clientX - t[1].clientX, t[0].clientY - t[1].clientY);
+
+        overlay.addEventListener("touchstart", (e) => {
+            if (e.target === overlay) return;
+            if (e.touches.length === 2) { zoomState.startDist = dist(e.touches); zoomState.startScale = zoomState.scale; }
+            else if (e.touches.length === 1 && zoomState.scale > 1) {
+                zoomState.dragging = true; zoomState.sx = e.touches[0].clientX; zoomState.sy = e.touches[0].clientY;
+                zoomState.ox = zoomState.x; zoomState.oy = zoomState.y;
+            }
+        }, { passive: false });
+        overlay.addEventListener("touchmove", (e) => {
+            if (e.touches.length === 2) {
+                e.preventDefault();
+                zoomState.scale = Math.min(5, Math.max(1, zoomState.startScale * (dist(e.touches) / zoomState.startDist)));
+                if (zoomState.scale === 1) { zoomState.x = 0; zoomState.y = 0; }
+                applyZoom();
+            } else if (zoomState.dragging) {
+                e.preventDefault();
+                zoomState.x = zoomState.ox + (e.touches[0].clientX - zoomState.sx);
+                zoomState.y = zoomState.oy + (e.touches[0].clientY - zoomState.sy);
+                applyZoom();
+            }
+        }, { passive: false });
+        overlay.addEventListener("touchend", (e) => { if (e.touches.length === 0) zoomState.dragging = false; });
+
+        // 데스크톱: 휠 줌, 더블클릭 토글
+        img.addEventListener("wheel", (e) => {
+            e.preventDefault();
+            zoomState.scale = Math.min(5, Math.max(1, zoomState.scale + (e.deltaY < 0 ? 0.2 : -0.2)));
+            if (zoomState.scale === 1) { zoomState.x = 0; zoomState.y = 0; }
+            applyZoom();
+        }, { passive: false });
+        img.addEventListener("dblclick", () => {
+            zoomState.scale = zoomState.scale > 1 ? 1 : 2;
+            if (zoomState.scale === 1) { zoomState.x = 0; zoomState.y = 0; }
+            applyZoom();
+        });
+    }
+
+    /* =========================================================
+       공통 유틸
+       ========================================================= */
+    function customConfirm(message) {
+        return new Promise((resolve) => {
+            document.getElementById("__cc")?.remove();
+            const m = document.createElement("div");
+            m.id = "__cc";
+            m.style.cssText = "position:fixed; inset:0; background:rgba(15,23,42,.55); z-index:3000; display:flex; align-items:center; justify-content:center; padding:16px;";
+            m.innerHTML = `<div style="background:#fff; border-radius:14px; padding:24px; max-width:340px; width:100%; text-align:center; box-shadow:var(--shadow-lg);">
+                <p style="margin:0 0 20px; font-size:1rem; line-height:1.6;">${message}</p>
+                <div style="display:flex; gap:8px;">
+                    <button id="__ccN" class="btn btn-ghost" style="flex:1;">취소</button>
+                    <button id="__ccY" class="btn btn-danger" style="flex:1;">확인</button>
+                </div></div>`;
+            document.body.appendChild(m);
+            m.querySelector("#__ccY").onclick = () => { m.remove(); resolve(true); };
+            m.querySelector("#__ccN").onclick = () => { m.remove(); resolve(false); };
+        });
+    }
+
+    let toastTimer = null;
+    function showToast(msg) {
+        const t = document.getElementById("toast");
+        t.innerHTML = msg;
+        t.classList.add("show");
+        clearTimeout(toastTimer);
+        toastTimer = setTimeout(() => t.classList.remove("show"), 2800);
+    }
+
+    function compressImage(src, quality = 0.4, maxWidth = 600) {
+        return new Promise((resolve) => {
+            const img = new Image();
+            img.src = src;
+            img.onload = () => {
+                const canvas = document.createElement("canvas");
+                let w = img.width, h = img.height;
+                if (w > maxWidth) { h *= maxWidth / w; w = maxWidth; }
+                canvas.width = w; canvas.height = h;
+                canvas.getContext("2d").drawImage(img, 0, 0, w, h);
+                resolve(canvas.toDataURL("image/jpeg", quality));
+            };
+            img.onerror = () => resolve(src);
+        });
+    }
+
+    function download(filename, content) {
+        const blob = new Blob([content], { type: "application/json" });
+        const a = document.createElement("a");
+        a.href = URL.createObjectURL(blob);
+        a.download = filename;
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        URL.revokeObjectURL(a.href);
+    }
+
+    function stamp() {
+        const n = new Date(), p = (x) => String(x).padStart(2, "0");
+        return `${n.getFullYear()}${p(n.getMonth() + 1)}${p(n.getDate())}_${p(n.getHours())}${p(n.getMinutes())}${p(n.getSeconds())}`;
+    }
+    function val(id) { return document.getElementById(id).value; }
+    function esc(s) { return String(s == null ? "" : s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c])); }
+
+    /* =========================================================
+       카테고리 사전 (AI 기준 "법전") — 원본 유지
+       ========================================================= */
+    function getCategories() {
+        return {
+            "보호구/PPE": ["안전모", "귀마개", "안전화", "안전대", "보안경", "마스크", "장갑", "조끼", "헬멧", "귀덮개", "보호구", "PPE", "방진마스크", "보안면", "안전장구", "앞치마", "커버"],
+            "위험성평가/활동": ["위험성평가", "TBM", "점검", "순찰", "현장확인", "유해위험요인", "대책", "개선", "안전활동", "활동"],
+            "교육/행정": ["안전교육", "정기교육", "특별교육", "수칙", "교육", "채용시교육", "작업내용변경시교육", "보건교육"],
+            "근골격계/운반": ["근골격계", "요통", "중량물", "인력운반", "상하차", "적재", "카트", "운반작업", "스트레칭", "허리", "운반"],
+            "추락/고소작업": ["비계", "발판", "난간", "사다리", "우마", "고소작업대", "추락", "생명줄", "개구부", "덮개", "렌탈", "스카이", "방호선반"],
+            "건설기계/양중": ["크레인", "지게차", "굴착기", "덤프", "리프트", "호이스트", "샤클", "줄걸이", "슬링벨트", "협착", "충돌", "백호", "항타기"],
+            "전기/에너지": ["분전반", "접지", "차단기", "케이블", "변압기", "절연", "감전", "활선", "배전반", "임시동력", "분전함"],
+            "화기/폭발": ["소화기", "용접", "절단", "가스", "불꽃방지", "화재", "폭발", "인화성", "산소통", "질소", "아세틸렌", "화기"],
+            "밀폐/보건": ["밀폐공간", "환기", "송풍기", "질식", "황화수소", "가스측정", "배풍기", "산소농도", "MSDS", "유해화학물질"],
+            "정리/환경": ["정리정돈", "폐기물", "청소", "살수", "세륜", "방진막", "청결", "자재정리", "환경", "위생"],
+            "교통/유도": ["신호수", "유도자", "감시원", "라바콘", "안전통로", "경사로", "계단", "펜스", "바리케이드", "통로"],
+            "휴먼에러/인적오류": ["휴먼에러", "인적오류", "인적원인", "실수"],
+            "협착": ["끼임", "압착", "말림"],
+            "떨어짐": ["추락"],
+            "미끄러짐": ["전도", "넘어짐", "미끄럼"],
+            "화학물질/유해인자": ["가스", "산소", "질소", "수소", "암모니아", "일산화탄소", "이산화탄소", "황화수소", "염소",
+                "벤젠", "톨루엔", "자일렌", "나트륨", "마그네슘", "칼륨", "수은", "납", "크롬", "니켈", "카드뮴",
+                "아세톤", "시너", "알코올", "메탄올", "에탄올", "황산", "질산", "염산", "인산", "불산", "유기용제",
+                "MSDS", "물질안전보건자료", "유해화학물질", "독성물질", "발암성물질", "인화성물질", "부식성물질",
+                "산화성물질", "폭발성물질", "금수성물질", "가연성가스", "용접흄", "분진", "미스트", "증기", "석면"],
+            "직업병/질환/의료": ["난청", "소음성난청", "이명", "근골격계", "요통", "디스크", "관절염", "건초염", "수근관증후군",
+                "진폐증", "석면폐", "천식", "피부염", "아토피", "화상", "동상", "열사병", "열경련", "탈진",
+                "중독", "질식", "산소결핍", "뇌심혈관", "뇌출혈", "뇌경색", "심근경색", "협심증", "고혈압", "당뇨",
+                "스트레스", "우울증", "불면증", "건강진단", "특수건강진단", "배치전건강진단", "응급처치", "심폐소생술"],
+            "전기/감전/방폭": ["감전", "누전", "접지", "절연", "단락", "합선", "과전류", "과부하", "정전기", "전압", "전류", "저항",
+                "차단기", "개폐기", "분전반", "배전반", "변압기", "케이블", "전선", "플러그", "콘센트", "스위치",
+                "방폭", "내압방폭", "안전증방폭", "본질안전", "활선", "검전기", "절연장갑", "절연화", "도전부", "충전부"],
+            "건설/토목/가설": ["비계", "강관비계", "시스템비계", "달비계", "말비계", "이동식비계", "작업발판", "가설통로", "사다리",
+                "거푸집", "동바리", "흙막이", "가시설", "지보공", "굴착", "터파기", "발파", "터널", "옹벽", "축대",
+                "성토", "절토", "개구부", "단부", "추락", "붕괴", "낙하", "매설물", "지반", "침하"],
+            "기계/장비/설비": ["프레스", "전단기", "절곡기", "선반", "밀링", "연삭기", "둥근톱", "컨베이어", "벨트", "롤러", "기어",
+                "회전체", "협착", "끼임", "말림", "방호장치", "안전장치", "리미트스위치", "인터록", "광전자식", "양수조작식",
+                "보일러", "압력용기", "공기압축기", "펌프", "배관", "밸브", "사출기", "로봇", "산업용로봇"],
+            "운반/하역/양중": ["크레인", "타워크레인", "천정크레인", "이동식크레인", "호이스트", "지게차", "화물차", "덤프트럭",
+                "굴착기", "포크레인", "로더", "리프트", "승강기", "곤돌라", "고소작업대", "양중기", "줄걸이", "슬링벨트",
+                "와이어로프", "체인", "샤클", "훅", "해지장치", "팔레트", "중량물", "인력운반"],
+            "화재/폭발/소방": ["화재", "폭발", "발화", "인화", "연소", "소화기", "소화전", "스프링클러", "감지기", "경보기", "대피",
+                "피난", "비상구", "유도등", "방화벽", "방화문", "방유제", "정전기", "불꽃", "스파크", "용접", "용단",
+                "화기작업", "자연발화", "분진폭발", "가스누출"],
+            "보호구/안전장구": ["안전모", "안전화", "안전대", "안전벨트", "보안경", "보안면", "귀마개", "귀덮개", "방진마스크", "방독마스크",
+                "송기마스크", "공기호흡기", "안전장갑", "보호복", "방열복", "각반", "안전블록", "추락방지대"],
+            "작업환경/위생/측정": ["작업환경측정", "소음", "진동", "분진", "조도", "온도", "습도", "환기", "국소배기", "전체환기", "후드",
+                "덕트", "송풍기", "밀폐공간", "산소농도", "유해가스", "검지관", "시료채취", "노출기준", "허용기준", "쾌적"],
+            "안전관리/제도/교육": ["산업안전보건법", "중대재해처벌법", "위험성평가", "안전관리자", "보건관리자", "관리감독자", "안전교육",
+                "특별교육", "정기교육", "채용시교육", "TBM", "툴박스미팅", "안전점검", "안전순찰", "지적확인", "아차사고",
+                "무재해", "표지판", "경고표지", "안전수칙", "작업허가서", "안전인증", "검사", "인허가"],
+            "유기용제/독성물질": ["벤젠", "톨루엔", "자일렌", "크실렌", "아세톤", "시너", "신너", "메탄올", "알코올", "에탄올",
+                "DMF", "TCE", "유기용제", "세척제", "페인트", "도장", "경화제", "발암성", "생식독성", "MSDS", "물질안전보건자료"],
+            "질식/밀폐가스": ["밀폐공간", "산소결핍", "질식", "황화수소", "일산화탄소", "이산화탄소", "메탄", "아르곤", "질소",
+                "복합가스", "농도측정", "환기", "송기마스크", "공기호흡기", "맨홀", "탱크", "피트", "정화조"],
+            "금속/분진/흄": ["용접흄", "흄", "분진", "가루", "먼지", "석면", "납", "수은", "카드뮴", "크롬", "망간", "니켈",
+                "제련", "주물", "샌딩", "그라인딩", "방진", "국소배기", "집진기"],
+            "근골격계/인체부담": ["근골격계", "요통", "디스크", "허리", "어깨", "손목", "무릎", "관절", "건초염", "수근관",
+                "중량물", "들기", "반복작업", "부자연스러운자세", "스트레칭", "휴식", "인력운반"],
+            "소음/청력": ["소음", "난청", "이명", "청력", "dB", "데시벨", "귀마개", "귀덮개", "청력보존", "오디오", "시끄러움"],
+            "뇌심혈관/온열질환": ["뇌심혈관", "뇌출혈", "심근경색", "협심증", "고혈압", "당뇨", "고지혈증", "폭염", "열사병",
+                "열탈진", "일사병", "탈수", "그늘", "휴식시간", "혹한", "동상", "저체온증"],
+            "스트레스/검진": ["직무스트레스", "감정노동", "우울증", "불면증", "검진", "특수검진", "배치전검진", "일반검진", "유소견자"],
+            "크레인/양중기": ["크레인", "호이스트", "천장크레인", "타워크레인", "이동식크레인", "카고", "하이드로", "양중", "인양",
+                "줄걸이", "슬링벨트", "와이어로프", "체인", "샤클", "훅", "해지장치", "보조로프", "신호수"],
+            "지게차/건설기계": ["지게차", "포크리프트", "백호", "굴착기", "포크레인", "로더", "불도저", "덤프", "레미콘",
+                "펌프카", "항타기", "천공기", "롤러", "후진경보", "협착", "충돌", "신호수"],
+            "프레스/공작기계": ["프레스", "전단기", "절곡기", "선반", "밀링", "드릴", "연삭기", "그라인더", "숫돌", "칩",
+                "방호장치", "광전자", "양수조작", "덮개", "울", "가동식"],
+            "컨베이어/회전체": ["컨베이어", "벨트", "롤러", "기어", "체인", "스프로킷", "회전축", "말림", "끼임", "비상정지", "풀코드"],
+            "감전/전기설비": ["감전", "누전", "접지", "절연", "충전부", "분전반", "배전반", "차단기", "콘센트", "플러그",
+                "케이블", "전선", "활선", "변압기", "이동전선", "검전기", "전기작업"],
+            "화재/폭발/화기": ["화재", "폭발", "용접", "용단", "불티", "스파크", "화기작업", "소화기", "소화전", "인화성",
+                "가연성", "발화", "연소", "화재감시자", "불꽃", "방화포"],
+            "비계/작업발판": ["비계", "시스템비계", "강관비계", "달비계", "말비계", "작업발판", "통로", "가설계단", "승강계단",
+                "안전난간", "발끝막이판", "클램프", "연결핀"],
+            "추락/개구부": ["추락", "떨어짐", "개구부", "단부", "구멍", "덮개", "안전대", "생명줄", "고소작업", "지붕",
+                "사다리", "우마", "안전방망", "추락방지"],
+            "거푸집/동바리": ["거푸집", "동바리", "시스템동바리", "파이프서포트", "멍에", "장선", "콘크리트", "타설", "양생",
+                "붕괴", "무너짐", "좌굴", "변위"],
+            "굴착/토목": ["굴착", "터파기", "흙막이", "가시설", "토사", "법면", "기울기", "매몰", "무너짐", "지하매설물",
+                "배수", "양수기", "옹벽", "석축"],
+            "보호구(PPE)": ["안전모", "안전화", "보안경", "보안면", "장갑", "조끼", "각반", "보호복", "방열복", "마스크", "착용"],
+            "정리정돈/전도": ["정리정돈", "청소", "청결", "바닥", "미끄러움", "걸림", "넘어짐", "전도", "통로확보", "자재적재",
+                "적치", "보관", "폐기물", "조명", "조도", "어두움"],
+            "안전시설/신호": ["방호울", "펜스", "바리케이드", "접근금지", "출입금지", "경고표지", "안전표지", "유도", "라바콘",
+                "신호", "사이렌", "경광등", "CCTV"],
+            "교육/행정/관리": ["교육", "TBM", "점검", "순찰", "지적", "개선", "조치", "수칙", "절차서", "작업허가", "PTW",
+                "관리감독자", "안전관리자", "위험성평가", "KRAS", "회의"],
+            "유기용제/도장작업": ["벤젠", "톨루엔", "자일렌", "크실렌", "아세톤", "시너", "신너", "메탄올", "알코올", "에탄올",
+                "DMF", "TCE", "세척제", "페인트", "도장", "붓", "롤러", "스프레이", "경화제", "희석제", "유증기"],
+            "산/알칼리/부식성": ["황산", "질산", "염산", "불산", "인산", "수산화나트륨", "가성소다", "암모니아", "부식", "화학화상",
+                "폐수", "중화", "세안설비", "긴급샤워", "PH", "리트머스", "누출"],
+            "질식/밀폐/가스": ["밀폐공간", "산소결핍", "질식", "황화수소", "일산화탄소", "이산화탄소", "메탄", "아르곤", "질소",
+                "복합가스", "농도측정", "환기", "송기마스크", "맨홀", "탱크", "피트", "정화조", "퍼지"],
+            "금속흄/분진/호흡기": ["용접흄", "흄", "분진", "가루", "먼지", "석면", "납", "수은", "카드뮴", "크롬", "망간", "니켈",
+                "제련", "주물", "샌딩", "그라인딩", "방진마스크", "집진기", "특수건강진단"],
+            "위험물/용기보관": ["드럼통", "말통", "유류", "기름", "휘발유", "경유", "등유", "MSDS", "경고표지", "소분용기",
+                "보관창고", "방유제", "누유", "흡착포"],
+            "수공구/동력공구": ["그라인더", "드릴", "절단기", "커터", "함마", "망치", "드라이버", "렌치", "스패너", "톱",
+                "전동공구", "에어건", "타카", "못", "날카로운", "베임", "찔림"],
+            "프레스/전단/협착": ["프레스", "전단기", "절곡기", "선반", "밀링", "CNC", "금형", "협착", "끼임", "눌림",
+                "광전자", "양수조작", "방호장치", "게이트", "인터록"],
+            "회전체/컨베이어": ["컨베이어", "벨트", "롤러", "기어", "체인", "스프로킷", "풀리", "회전축", "말림", "장갑",
+                "비상정지", "풀코드", "덮개", "울"],
+            "압력설비/보일러": ["보일러", "압력용기", "배관", "밸브", "플랜지", "개스킷", "콤프레샤", "공기압축기", "안전변",
+                "파열판", "게이지", "압력계", "스팀", "증기", "고압"],
+            "로봇/자동화설비": ["산업용로봇", "로봇", "티칭", "교시", "매니퓰레이터", "AGV", "자동화", "센서", "펜스", "방호울", "오작동"],
+            "크레인/호이스트": ["크레인", "호이스트", "천장크레인", "양중", "인양", "훅", "해지장치", "과부하방지", "권과방지",
+                "붐대", "아웃트리거", "전도"],
+            "줄걸이/리깅": ["줄걸이", "슬링벨트", "와이어로프", "샤클", "체인블럭", "레버블럭", "매듭", "파단", "소선", "킹크", "부식"],
+            "지게차/운반차량": ["지게차", "포크", "백레스트", "헤드가드", "전조등", "후미등", "후진경보기", "안전벨트", "과속",
+                "충돌", "운전원", "면허", "키박스"],
+            "건설기계/중장비": ["굴착기", "포크레인", "백호", "로더", "불도저", "덤프트럭", "레미콘", "펌프카", "항타기", "천공기",
+                "사각지대", "유도자", "신호수"],
+            "감전/접지/절연": ["감전", "누전", "접지", "절연", "충전부", "노출", "피복", "손상", "물기", "습기", "전기작업", "정전"],
+            "배전반/전설설비": ["분전반", "배전반", "차단기", "개폐기", "콘센트", "플러그", "멀티탭", "돼지코", "전선", "케이블",
+                "가공전선", "임시전력", "변압기"],
+            "정전기/방폭": ["정전기", "제전", "방폭", "내압방폭", "본질안전", "스파크", "점화원", "Bonding", "어스"],
+            "비계/발판/가설": ["비계", "시스템비계", "강관비계", "비계다리", "작업발판", "통로", "가설계단", "클램프", "연결핀",
+                "벽이음", "설치", "해체"],
+            "사다리/이동식작업대": ["사다리", "A형사다리", "일자사다리", "우마", "말비계", "고소작업대", "렌탈", "스카이", "전도", "아우트리거"],
+            "거푸집/동바리/콘크리트": ["거푸집", "동바리", "시스템동바리", "서포트", "멍에", "장선", "유로폼", "콘크리트", "타설", "양생",
+                "붕괴", "하중"],
+            "토목/굴착/흙막이": ["굴착", "터파기", "흙막이", "가시설", "토사", "법면", "사면", "무너짐", "매몰", "지하수", "배수", "옹벽"],
+            "화재/소화설비": ["화재", "불", "연기", "소화기", "소화전", "스프링클러", "감지기", "경보기", "발신기", "비상벨",
+                "방화문", "셔터", "구획"],
+            "용접/화기작업": ["용접", "용단", "절단", "산소", "LPG", "아세틸렌", "가스통", "토치", "불티", "불꽃", "비산",
+                "방화포", "화재감시자"],
+            "비상대응/대피": ["비상구", "대피", "탈출", "피난", "유도등", "통로", "장애물", "적치", "훈련", "응급처치",
+                "AED", "구급함"],
+            "근골격계/인체": ["근골격계", "요통", "허리", "어깨", "손목", "무릎", "통증", "중량물", "들기", "반복", "자세", "스트레칭"],
+            "소음/진동/청력": ["소음", "시끄러움", "난청", "이명", "귀마개", "귀덮개", "진동", "착암기", "떨림", "백랍병"],
+            "고온/저온/날씨": ["폭염", "더위", "열사병", "일사병", "탈진", "휴식", "물", "그늘", "혹한", "추위", "동상",
+                "저체온", "강풍", "태풍", "비", "눈"],
+            "생물학/감염/위생": ["식중독", "감염", "바이러스", "세균", "곰팡이", "벌레", "해충", "쥐", "동물", "주사기",
+                "혈액", "위생", "식당", "화장실"],
+            "방사선/레이저/빛": ["방사선", "X-ray", "RT", "비파괴", "동위원소", "선량계", "피폭", "레이저", "광선", "자외선", "용접면"],
+            "조명/작업환경": ["조명", "조도", "어두움", "깜빡임", "전구", "램프", "야간작업", "시야", "확보", "눈부심"],
+            "안전시설/표지": ["안전표지", "경고", "금지", "지시", "안내", "현수막", "표지판", "라바콘", "바리케이드", "PE드럼", "구획"],
+            "관리/교육/절차": ["관리감독자", "안전관리자", "작업지휘자", "교육", "TBM", "점검", "순찰", "허가서", "PTW",
+                "위험성평가", "회의", "지적"],
+            "동력전달/축/회전": ["회전축", "커플링", "플랜지", "풀리", "기어", "스프로킷", "체인", "축커플링", "회전부", "노출", "덮개미비"],
+            "끼임/말림/인접": ["컨베이어", "롤러", "벨트", "끼임", "말림", "협착", "비상정지", "풀코드", "인터록", "가드"],
+            "프레스/금형/압착": ["프레스", "금형", "전단기", "절곡기", "다이", "펀치", "슬라이드", "양수조작", "광전자"],
+            "수공구/베임/찔림": ["커터", "칼", "드라이버", "망치", "함마", "스패너", "렌치", "베임", "찔림", "날카로운", "파편"],
+            "동력공구/그라인더": ["그라인더", "숫돌", "덮개", "절단기", "드릴", "임팩", "톱", "원형톱", "불꽃방지"],
+            "나사/볼트/체결": ["볼트", "너트", "와셔", "핀", "체결", "풀림", "마모", "부식", "이탈", "탈락"],
+            "크레인/양중설비": ["크레인", "호이스트", "천장크레인", "타워크레인", "양중", "인양", "과부하", "권과"],
+            "줄걸이/슬링/샤클": ["와이어로프", "슬링벨트", "샤클", "훅", "해지장치", "꼬임", "단선", "부식", "매듭"],
+            "지게차/화물차": ["지게차", "포크", "백레스트", "후진경보", "안전벨트", "과속", "충돌", "운반", "상하차"],
+            "건설중장비/토목": ["굴착기", "덤프", "로더", "펌프카", "항타기", "사각지대", "유도자", "신호수", "협착"],
+            "고소작업대/렌탈": ["고소작업대", "렌탈", "스카이", "리프트", "아우트리거", "과상승", "추락"],
+            "충전부/노출/전선": ["충전부", "피복", "손상", "전선", "케이블", "가공전선", "임시전선", "물기", "절연"],
+            "차단기/분전반": ["분전반", "배전반", "차단기", "ELB", "MCCB", "개폐기", "콘센트", "플러그", "과부하"],
+            "접지/누전/정전기": ["접지", "누전", "전위", "본딩", "정전기", "제전", "감전", "절연장갑", "검전기"],
+            "방폭/특수전기": ["방폭", "내압", "본질안전", "가스누출", "점화원", "전기방전", "스파크"],
+            "용접/용단/불꽃": ["용접", "용단", "토치", "산소", "아세틸렌", "LPG", "가스통", "불꽃", "비산", "방화포"],
+            "소화/경보설비": ["소화기", "소화전", "스프링클러", "감지기", "경보기", "발신기", "비상벨", "유도등"],
+            "인화성/폭발물": ["인화성", "가연성", "폭발", "발화", "자연발화", "유증기", "위험물보관", "방유제"],
+            "비상대피/통로": ["비상구", "피난", "탈출", "피난계단", "장애물", "폐쇄", "대피소", "훈련"],
+            "추락/단부/개구부": ["추락", "떨어짐", "개구부", "단부", "구멍", "덮개", "안전난간", "방망", "생명줄"],
+            "사다리/말비계": ["사다리", "우마", "말비계", "이동식사다리", "2인1조", "전도", "미끄럼방지"],
+            "붕괴/흙막이/지반": ["붕괴", "무너짐", "동바리", "흙막이", "사면", "토사", "침하", "균열", "전조"],
+            "밀폐/질식/산소": ["밀폐공간", "산소결핍", "황화수소", "일산화탄소", "농도측정", "환기", "송기마스크", "탱크"],
+            "유기용제/화학상": ["벤젠", "톨루엔", "시너", "세척제", "도장", "MSDS", "소분용기", "화학화상", "샤워"],
+            "분진/석면/흄": ["분진", "가루", "석면", "용접흄", "먼지", "집진기", "방진마스크", "호흡기"],
+            "근골격계/자세": ["요통", "허리", "어깨", "손목", "부자연스러운", "중량물", "반복", "스트레칭"],
+            "온열/기상/날씨": ["폭염", "열사병", "탈진", "그늘", "혹한", "동상", "강풍", "태풍", "미세먼지"],
+            "정리/바닥/전도": ["정리정돈", "미끄러움", "걸림", "넘어짐", "전도", "오일", "물기", "폐기물"],
+            "조명/야간/시야": ["조도", "어두움", "조명", "야간", "시야미확보", "깜빡임", "전구"],
+            "안전모/보호구": ["안전모", "턱끈", "안전화", "보안경", "안전대", "장갑", "착용", "손상", "노후"],
+            "관리/교육/서류": ["안전교육", "TBM", "점검", "수칙", "절차", "위험성평가", "허가서", "회의", "지휘"],
+            "표지/구획/차단": ["안전표지", "바리케이드", "라바콘", "구획", "출입금지", "경고", "금지"]
+        };
+    }
+
+    /* =========================================================
+       외부 노출 (inline onclick 핸들러)
+       ========================================================= */
+    window.App = {
+        submitPwd, logoutAdmin,
+        backToGallery, quickAdd, openZoom, closeZoom,
+        saveSheet, closeSheet, deleteActivePin,
+        closePeerModal, submitEntry, backupMine,
+        selectAll, clearFilter, printAll, analyze, closeModal,
+        saveReGrouped, showReport, modifyReGroup, resetReGroup,
+        renderTable
+    };
+})();
+
+    </script>
+</body>
+
+</html>
