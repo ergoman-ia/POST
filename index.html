@@ -441,7 +441,7 @@
     <!-- ===== 상단 바 ===== -->
     <header class="topbar">
         <div class="topbar-inner">
-            <div class="brand"><span class="dot"></span> 현장 사진으로 위험요인 점검</div>
+            <div class="brand"><span class="dot"></span> 현장 사진에서 위험요인 점검</div>
             <div class="seg" id="modeSeg">
                 <button class="user active" data-mode="user">👤 분석자</button>
                 <button class="admin" data-mode="admin">🔐 관리자</button>
@@ -1698,7 +1698,7 @@
                         <img src="${p.image}" alt="현장 사진" draggable="false">
                         <button class="ctl vis" data-id="${p.id}" data-hidden="${hidden}" title="노출/숨김">${hidden ? "🙈" : "👁️"}</button>
                         <button class="ctl rm" data-rm="${p.id}" title="삭제">×</button>
-                        <div class="drag-handle" title="끌어서 순서 변경">⠿ 이동</div>
+                        <div class="drag-handle" title="끌어서 순서 변경">⠿</div>
                     </div>`;
         }).join("");
         wrap.querySelectorAll(".vis").forEach((b) =>
