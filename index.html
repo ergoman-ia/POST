@@ -436,7 +436,7 @@
                         </div>
                     </div>
                     <div id="userGallery" class="gallery-grid" style="margin-top:14px;">
-                        <div class="empty-state">사진을 불러오는 중…</div>
+                        <div class="empty-state">사진을 불러오는 중… <small style="opacity:.5">(v3)</small></div>
                     </div>
                 </div>
             </div>
@@ -646,6 +646,7 @@
        초기화
        ========================================================= */
     window.addEventListener("load", async () => {
+        console.log("[점검앱] build v3 부팅");
         isMobile = /android|iphone|ipad|ipod|blackberry|iemobile|opera mini/i.test(navigator.userAgent.toLowerCase())
             || window.innerWidth <= 768;
 
@@ -658,6 +659,16 @@
         wireEvents();
 
         await whenFsReady();
+
+        // Firebase가 끝내 준비되지 않은 경우(예: secrets.js 누락, CDN 차단, 초기화 실패)
+        // 무한 로딩 대신 명확한 오류를 화면에 표시한다.
+        if (!window.fs || !window.fs.db) {
+            console.error("Firebase(window.fs)가 준비되지 않았습니다.");
+            _lastLoadError = "Firebase 초기화 실패 — secrets.js·네트워크(gstatic 차단)·설정을 확인하세요. (콘솔 로그 참고)";
+            showGalleryError();
+            return;
+        }
+
         watchGallery();
         watchData();
     });
@@ -751,27 +762,40 @@
     let _dataReady = false;
     let _galleryUnsub = null;
     let _dataUnsub = null;
+    let _lastLoadError = "";
+
+    // 약속이 일정 시간 내 끝나지 않으면 강제로 거부 (모바일에서 응답 없이 멈추는 것 방지)
+    function withTimeout(promise, ms, label) {
+        return Promise.race([
+            promise,
+            new Promise((_, rej) => setTimeout(() => rej(new Error((label || "요청") + " 시간 초과(" + ms + "ms)")), ms))
+        ]);
+    }
 
     // 1회성 읽기 (실시간 연결이 늦거나 실패할 때 화면을 채워준다)
     async function oneShotLoad(q, getDocs, apply, onFail) {
         try {
-            const snap = await getDocs(q);
+            const snap = await withTimeout(getDocs(q), 8000, "사진 읽기");
             apply(snap);
         } catch (e) {
             console.error("1회성 로드 실패:", e);
+            _lastLoadError = (e && e.message) || String(e);
             if (onFail) onFail();
         }
     }
 
     function showGalleryError() {
         if (_galleryReady) return;
+        const detail = _lastLoadError
+            ? `<br><small style="color:var(--danger); word-break:break-all;">사유: ${esc(_lastLoadError)}</small>`
+            : "";
         const html = `<div class="empty-state">사진을 불러오지 못했습니다.<br>
-            네트워크 상태를 확인한 뒤 다시 시도해 주세요.<br>
+            네트워크·로그인·접근권한을 확인한 뒤 다시 시도해 주세요.${detail}<br>
             <button class="btn btn-soft btn-sm" style="margin-top:10px;" onclick="App.retryLoad()">🔄 다시 시도</button></div>`;
         const ug = document.getElementById("userGallery");
         if (ug) ug.innerHTML = html;
         const ag = document.getElementById("adminGallery");
-        if (ag) ag.innerHTML = `<div class="empty-state" style="width:100%;">불러오지 못했습니다. <button class="btn btn-soft btn-sm" onclick="App.retryLoad()">🔄 다시 시도</button></div>`;
+        if (ag) ag.innerHTML = `<div class="empty-state" style="width:100%;">불러오지 못했습니다.${detail} <button class="btn btn-soft btn-sm" onclick="App.retryLoad()">🔄 다시 시도</button></div>`;
     }
 
     function watchGallery() {
@@ -792,17 +816,24 @@
         try {
             _galleryUnsub = onSnapshot(q, apply, (err) => {
                 console.error("갤러리 실시간 동기화 오류:", err);
+                _lastLoadError = (err && err.message) || String(err);
                 oneShotLoad(q, getDocs, apply, showGalleryError);
             });
         } catch (e) {
             console.error(e);
+            _lastLoadError = (e && e.message) || String(e);
             oneShotLoad(q, getDocs, apply, showGalleryError);
         }
 
-        // 안전망: 일정 시간 내 응답이 없으면 1회성 읽기로 화면을 채운다
+        // 1차 안전망: 실시간 응답이 없으면 1회성 읽기로 화면을 채운다
         setTimeout(() => {
             if (!_galleryReady) oneShotLoad(q, getDocs, apply, showGalleryError);
         }, 4500);
+
+        // 최종 안전망: 무슨 일이 있어도(읽기가 응답 없이 멈춰도) 12초 뒤엔 오류 화면을 띄운다
+        setTimeout(() => {
+            if (!_galleryReady) showGalleryError();
+        }, 12000);
     }
 
     function watchData() {
@@ -839,8 +870,9 @@
     function retryLoad() {
         _galleryReady = false;
         _dataReady = false;
+        _lastLoadError = "";
         const ug = document.getElementById("userGallery");
-        if (ug) ug.innerHTML = `<div class="empty-state">사진을 불러오는 중…</div>`;
+        if (ug) ug.innerHTML = `<div class="empty-state">사진을 불러오는 중… <small style="opacity:.5">(v3)</small></div>`;
         const ag = document.getElementById("adminGallery");
         if (ag) ag.innerHTML = `<div class="empty-state">불러오는 중…</div>`;
         watchGallery();
