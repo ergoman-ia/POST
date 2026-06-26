@@ -1060,6 +1060,78 @@
         }
     }
 
+    /* =========================================================
+       REST 쓰기 — 인증 SDK가 막힌 환경(Brave iOS)에서 저장하기.
+       REST로 직접 익명 토큰을 받아(SDK가 멈추는 installations 단계 우회)
+       그 토큰으로 Firestore REST 저장을 수행한다.
+       (보안 규칙의 'allow write: if request.auth != null'을 그대로 만족)
+       ========================================================= */
+    let _restToken = null, _restTokenExp = 0;
+    async function restAuthToken() {
+        const cfg = window.FB || {};
+        if (!cfg.apiKey) throw new Error("apiKey 없음");
+        if (_restToken && Date.now() < _restTokenExp - 60000) return _restToken;
+        const url = `https://identitytoolkit.googleapis.com/v1/accounts:signUp?key=${encodeURIComponent(cfg.apiKey)}`;
+        const res = await withTimeout(fetch(url, {
+            method: "POST", headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ returnSecureToken: true })
+        }), 12000, "REST 로그인");
+        if (!res.ok) throw new Error("REST 로그인 실패 HTTP " + res.status);
+        const j = await res.json();
+        _restToken = j.idToken;
+        _restTokenExp = Date.now() + (Number(j.expiresIn || 3600) * 1000);
+        return _restToken;
+    }
+    function toRestVal(v) {
+        if (v === null || v === undefined) return { nullValue: null };
+        if (typeof v === "string") return { stringValue: v };
+        if (typeof v === "boolean") return { booleanValue: v };
+        if (typeof v === "number") return Number.isInteger(v) ? { integerValue: String(v) } : { doubleValue: v };
+        if (Array.isArray(v)) return { arrayValue: { values: v.map(toRestVal) } };
+        if (typeof v === "object") { const fields = {}; for (const k in v) fields[k] = toRestVal(v[k]); return { mapValue: { fields } }; }
+        return { nullValue: null };
+    }
+    function toRestFields(obj) { const f = {}; for (const k in obj) f[k] = toRestVal(obj[k]); return f; }
+
+    async function restCreateDoc(coll, data) {
+        const cfg = window.FB || {};
+        const token = await restAuthToken();
+        const url = `https://firestore.googleapis.com/v1/projects/${cfg.projectId}/databases/(default)/documents/${coll}?key=${encodeURIComponent(cfg.apiKey)}`;
+        const res = await withTimeout(fetch(url, {
+            method: "POST",
+            headers: { "Content-Type": "application/json", "Authorization": "Bearer " + token },
+            body: JSON.stringify({ fields: toRestFields(data) })
+        }), 15000, "REST 저장");
+        if (!res.ok) { const t = await res.text().catch(() => ""); throw new Error("REST 저장 HTTP " + res.status + " " + t.slice(0, 120)); }
+        return res.json();
+    }
+    async function restSetDoc(coll, docId, data) {
+        const cfg = window.FB || {};
+        const token = await restAuthToken();
+        const url = `https://firestore.googleapis.com/v1/projects/${cfg.projectId}/databases/(default)/documents/${coll}/${docId}?key=${encodeURIComponent(cfg.apiKey)}`;
+        const res = await withTimeout(fetch(url, {
+            method: "PATCH",
+            headers: { "Content-Type": "application/json", "Authorization": "Bearer " + token },
+            body: JSON.stringify({ fields: toRestFields(data) })
+        }), 15000, "REST 저장");
+        if (!res.ok) { const t = await res.text().catch(() => ""); throw new Error("REST 저장 HTTP " + res.status + " " + t.slice(0, 120)); }
+        return res.json();
+    }
+    // 인증이 살아있으면 SDK, 막혀있으면(또는 SDK 실패 시) REST로 저장한다. 새 dbId 반환.
+    async function persistEntry(entry, targetDbId) {
+        if (window.__authReady && window.fs && window.fs.db) {
+            try {
+                const { db, collection, addDoc, doc, setDoc } = window.fs;
+                if (targetDbId) { await withTimeout(setDoc(doc(db, "inspections", targetDbId), entry), 8000, "저장"); return targetDbId; }
+                const ref = await withTimeout(addDoc(collection(db, "inspections"), entry), 8000, "저장");
+                return ref.id;
+            } catch (e) { console.warn("SDK 저장 실패 → REST로 재시도:", e); }
+        }
+        if (targetDbId) { await restSetDoc("inspections", targetDbId, entry); return targetDbId; }
+        const created = await restCreateDoc("inspections", entry);
+        return (created && created.name) ? created.name.split("/").pop() : ("local_" + entry.id);
+    }
+
     let _autoHealTried = false;
     function showGalleryError() {
         if (_galleryReady) return;
@@ -1545,18 +1617,25 @@
 
         showToast("⏳ 저장 중…");
         try {
-            const { db, collection, addDoc, doc, setDoc } = window.fs;
-            if (targetDbId) await setDoc(doc(db, "inspections", targetDbId), entry);
-            else await addDoc(collection(db, "inspections"), entry);
+            const newId = await persistEntry(entry, targetDbId);
+
+            // 실시간 동기화가 막힌 환경(Brave iOS)에서도 화면에 바로 반영되도록
+            // 로컬 목록을 즉시 갱신한다.
+            if (targetDbId) {
+                const i = entryList.findIndex((it) => it.dbId === targetDbId);
+                if (i >= 0) entryList[i] = { dbId: targetDbId, ...entry };
+            } else {
+                entryList.unshift({ dbId: newId, ...entry });
+            }
 
             showToast(dup ? "♻️ 내용을 수정했습니다" : "✅ 등록을 완료했습니다");
-            // 입력 초기화 후 갤러리로
             issues = [];
             document.getElementById("quickInput").value = "";
+            renderUserGallery();
             backToGallery();
         } catch (e) {
             console.error(e);
-            showToast("❌ 저장 실패: " + e.message);
+            showToast("❌ 저장 실패: " + (e.message || e));
         }
     }
 
