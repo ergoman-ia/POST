@@ -1031,6 +1031,7 @@
     async function restLoadData() {
         const docs = await restFetchCollection("inspections", 300);
         entryList = docs.map((d) => { const { id, ...rest } = d; return { dbId: id, ...rest }; });
+        entryList.sort((a, b) => (b.timestamp || 0) - (a.timestamp || 0));   // 최신 입력순(SDK orderBy와 동일)
         _dataReady = true;
         renderTable();
         renderUserGallery();
@@ -1925,7 +1926,7 @@
             const photoOk = filteredPhoto ? it.photo === filteredPhoto : true;
             const kwOk = !kw || [it.name, it.org, (it.issues || []).join(" ")].join(" ").toLowerCase().includes(kw);
             return dateOk && photoOk && kwOk;
-        });
+        }).sort((a, b) => (b.timestamp || 0) - (a.timestamp || 0));   // 항상 최신 입력순
 
         const tbody = document.querySelector("#adminTable tbody");
         if (rows.length === 0) {
