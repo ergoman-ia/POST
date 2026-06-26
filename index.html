@@ -24,6 +24,8 @@
 
         window.GEMINI_API_KEY = GEMINI_API_KEY;
         window.ADMIN_PASSWORD = ADMIN_PASSWORD;
+        // REST 폴백(인증·스트리밍 우회 읽기)에 쓸 프로젝트 정보
+        window.FB = { projectId: FIREBASE_CONFIG.projectId, apiKey: FIREBASE_CONFIG.apiKey };
 
         const app = initializeApp(FIREBASE_CONFIG);
         // 모바일/제한적 네트워크(Brave 등 프라이버시 브라우저, 프록시) 환경에서
@@ -972,6 +974,73 @@
         }
     }
 
+    /* =========================================================
+       REST 폴백 — Firebase 인증/스트리밍을 거치지 않고
+       단순 HTTPS GET 한 번으로 컬렉션을 읽는다.
+       (Brave iOS처럼 인증·WebChannel이 막히는 환경 우회용.
+        단, Firestore 보안 규칙에서 해당 컬렉션 '읽기'가 공개여야 한다.)
+       ========================================================= */
+    function restVal(v) {
+        if (v == null) return null;
+        if ("stringValue" in v) return v.stringValue;
+        if ("integerValue" in v) return Number(v.integerValue);
+        if ("doubleValue" in v) return Number(v.doubleValue);
+        if ("booleanValue" in v) return v.booleanValue;
+        if ("timestampValue" in v) return Date.parse(v.timestampValue);
+        if ("nullValue" in v) return null;
+        if ("arrayValue" in v) return (v.arrayValue.values || []).map(restVal);
+        if ("mapValue" in v) { const m = {}, ff = v.mapValue.fields || {}; for (const k in ff) m[k] = restVal(ff[k]); return m; }
+        return null;
+    }
+    function restDocToObj(d) {
+        const o = { id: (d.name || "").split("/").pop() };
+        const f = d.fields || {};
+        for (const k in f) o[k] = restVal(f[k]);
+        return o;
+    }
+    async function restFetchCollection(name, pageSize) {
+        const cfg = window.FB || {};
+        if (!cfg.projectId || !cfg.apiKey) throw new Error("프로젝트 설정(window.FB) 없음");
+        const base = `https://firestore.googleapis.com/v1/projects/${cfg.projectId}/databases/(default)/documents/${name}`;
+        let docs = [], token = "", guard = 0;
+        do {
+            const url = base + `?key=${encodeURIComponent(cfg.apiKey)}&pageSize=${pageSize || 300}`
+                + (token ? `&pageToken=${encodeURIComponent(token)}` : "");
+            const res = await withTimeout(fetch(url, { method: "GET", cache: "no-store" }), 12000, "REST 읽기");
+            if (!res.ok) {
+                let why = "REST HTTP " + res.status;
+                if (res.status === 403) why += " — 보안 규칙이 공개 읽기를 막고 있습니다(규칙 수정 필요)";
+                throw new Error(why);
+            }
+            const json = await res.json();
+            (json.documents || []).forEach((d) => docs.push(restDocToObj(d)));
+            token = json.nextPageToken || "";
+        } while (token && ++guard < 20);
+        return docs;
+    }
+    async function restLoadPhotos() {
+        const docs = await restFetchCollection("site_photos", 300);
+        photoList = docs;
+        photoList.sort((a, b) => effOrder(a) - effOrder(b));
+        _galleryReady = true;
+        _autoHealTried = false;
+        renderUserGallery();
+        renderAdminGallery();
+    }
+    // SDK 읽기가 실패/지연되면 REST로 한 번 더 시도하고, 그것도 안 되면 오류 화면.
+    async function galleryFallback() {
+        if (_galleryReady) return;
+        try {
+            console.log("[점검앱] REST 폴백 시도");
+            await restLoadPhotos();
+            showToast("📷 사진을 불러왔습니다");
+        } catch (e) {
+            console.error("REST 폴백 실패:", e);
+            _lastLoadError = (e && e.message) || String(e);
+            showGalleryError();
+        }
+    }
+
     let _autoHealTried = false;
     function showGalleryError() {
         if (_galleryReady) return;
@@ -1050,16 +1119,26 @@
                 readMsg = `실패 — 코드:${e.code || "?"} / ${(e.message || e)}`; readBad = true;
             }
         }
-        add("Firestore 읽기", readMsg, readBad);
+        add("Firestore 읽기(SDK)", readMsg, readBad);
+
+        // 결정적 테스트: 인증·스트리밍을 거치지 않는 단순 REST GET이 되는가?
+        let restMsg = "건너뜀", restBad = true;
+        try {
+            const t0 = Date.now();
+            const docs = await restFetchCollection("site_photos", 1);
+            restMsg = `성공 — ${docs.length}건 응답, ${Date.now() - t0}ms`; restBad = false;
+        } catch (e) {
+            restMsg = `실패 — ${(e.message || e)}`; restBad = true;
+        }
+        add("Firestore 읽기(REST)", restMsg, restBad);
 
         // 해석 한 줄
         let verdict = "원인 불명 — 위 결과를 캡처해 공유해 주세요.";
         if (!navigator.onLine) verdict = "네트워크가 끊겨 있습니다.";
-        else if (idb !== "사용 가능") verdict = "Brave가 저장소를 차단해 로그인이 유지되지 않습니다 → Shields를 이 사이트에서 끄거나, 읽기에 로그인을 요구하지 않도록 보안 규칙을 바꿔야 합니다.";
-        else if (!authOk) verdict = "익명 로그인이 막혀 있습니다(주로 Brave Shields) → Shields를 끄거나 보안 규칙을 공개 읽기로 바꾸면 해결됩니다.";
-        else if (readBad && /permission|insufficient|unauth/i.test(readMsg)) verdict = "로그인은 됐지만 보안 규칙이 읽기를 거부합니다 → Firestore 규칙을 확인하세요.";
-        else if (readBad) verdict = "연결/전송이 막혀 읽기가 실패합니다(Shields 또는 네트워크).";
-        else verdict = "진단에서는 읽기가 성공했습니다 → 최초 로딩 타이밍 문제일 수 있으니, 이 상태에서 '다시 시도'를 누르면 화면이 채워질 것입니다.";
+        else if (!restBad) verdict = "REST 직접 읽기는 성공했습니다! 이 버전은 인증이 막혀도 이 경로로 사진을 불러옵니다 → '다시 시도'를 누르면 보일 것입니다.";
+        else if (/403|공개 읽기/.test(restMsg)) verdict = "보안 규칙이 공개 읽기를 막고 있습니다 → Firestore 규칙에서 site_photos·inspections 읽기를 공개로 열면 해결됩니다.";
+        else if (restBad && (idb !== "사용 가능" || !authOk)) verdict = "Brave가 구글(googleapis) 요청 자체를 막고 있습니다. Shields를 끈 뒤 Brave를 완전히 종료했다 다시 켜보세요. 그래도 안 되면 이 도메인은 Brave에서 막혀 페이지 코드로는 우회 불가 — 해당 사용자는 사파리/크롬 사용 권장.";
+        else verdict = "연결/전송이 막혀 읽기가 실패합니다(브라우저 차단 또는 네트워크).";
 
         const panel = `<div class="empty-state" style="text-align:left;max-width:520px;width:100%;">
             <div style="font-weight:700;margin-bottom:4px;">🔍 진단 결과</div>
@@ -1095,23 +1174,22 @@
             _galleryUnsub = onSnapshot(q, apply, (err) => {
                 console.error("갤러리 실시간 동기화 오류:", err);
                 _lastLoadError = (err && err.message) || String(err);
-                oneShotLoad(q, getDocs, apply, showGalleryError);
+                oneShotLoad(q, getDocs, apply, galleryFallback);
             });
         } catch (e) {
             console.error(e);
             _lastLoadError = (e && e.message) || String(e);
-            oneShotLoad(q, getDocs, apply, showGalleryError);
+            oneShotLoad(q, getDocs, apply, galleryFallback);
         }
 
         // 1차 안전망: 실시간 응답이 없으면 1회성 읽기로 화면을 채운다
         setTimeout(() => {
-            if (!_galleryReady) oneShotLoad(q, getDocs, apply, showGalleryError);
+            if (!_galleryReady) oneShotLoad(q, getDocs, apply, galleryFallback);
         }, 4500);
 
-        // 최종 안전망: 무슨 일이 있어도(읽기가 응답 없이 멈춰도) 20초 뒤엔
-        // 자동 복구(1회) 또는 오류 화면을 띄운다.
+        // 최종 안전망: SDK가 응답 없이 멈춰도, REST 폴백 → 그래도 안 되면 오류/자동복구.
         setTimeout(() => {
-            if (!_galleryReady) showGalleryError();
+            if (!_galleryReady) galleryFallback();
         }, 20000);
     }
 
