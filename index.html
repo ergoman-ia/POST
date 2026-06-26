@@ -473,7 +473,15 @@
 
                     <ul id="issueList" class="issue-list"></ul>
 
-                    <div class="grid-2" id="nameOrgGrid" style="margin-top:16px; padding-top:16px; border-top:1px dashed var(--line);">
+                    <div style="margin-top:16px; padding-top:16px; border-top:1px dashed var(--line); display:flex; align-items:center; justify-content:space-between; gap:8px; flex-wrap:wrap;">
+                        <span style="font-size:.82rem; color:var(--muted); font-weight:600;">🧑‍💼 이름·소속 기억</span>
+                        <div class="seg" id="rememberSeg">
+                            <button type="button" data-remember="1">📌 고정</button>
+                            <button type="button" data-remember="0">🔄 매번 리셋</button>
+                        </div>
+                    </div>
+
+                    <div class="grid-2" id="nameOrgGrid" style="margin-top:12px;">
                         <div class="field">
                             <label for="userName">이름</label>
                             <input type="text" id="userName" placeholder="예: 홍길동">
@@ -625,7 +633,8 @@
 
     const LS = {
         name: "inspector_name",
-        org: "inspector_org"
+        org: "inspector_org",
+        remember: "inspector_remember"   // "1" = 고정 사용, "0" = 매번 리셋
     };
 
     /* ---------- fs 준비 대기 ---------- */
@@ -650,11 +659,9 @@
         isMobile = /android|iphone|ipad|ipod|blackberry|iemobile|opera mini/i.test(navigator.userAgent.toLowerCase())
             || window.innerWidth <= 768;
 
-        // 저장된 이름/소속 복원
-        try {
-            document.getElementById("userName").value = localStorage.getItem(LS.name) || "";
-            document.getElementById("userOrg").value = localStorage.getItem(LS.org) || "";
-        } catch (e) { }
+        // 이름·소속 "고정 / 매번 리셋" 설정 적용 (기본: 고정)
+        const remember = (localStorage.getItem(LS.remember) ?? "1") !== "0";
+        applyRememberMode(remember, true);
 
         wireEvents();
 
@@ -683,12 +690,23 @@
         // 사진 스테이지 클릭 → 핀
         document.getElementById("stage").addEventListener("click", onStageClick);
 
-        // 이름/소속 입력 시 기억(자동완성 편의용). 더 이상 동료 결과 노출에 영향 없음.
+        // 이름/소속 입력 시: "고정" 모드일 때만 기억한다.
         ["userName", "userOrg"].forEach((id) => {
             document.getElementById(id).addEventListener("input", (e) => {
-                try { localStorage.setItem(id === "userName" ? LS.name : LS.org, e.target.value); } catch (_) { }
+                if (isRemember()) {
+                    try { localStorage.setItem(id === "userName" ? LS.name : LS.org, e.target.value); } catch (_) { }
+                }
                 updateSubmitBar();
             });
+        });
+
+        // 이름·소속 기억 방식 토글 (고정 / 매번 리셋)
+        document.getElementById("rememberSeg").addEventListener("click", (e) => {
+            const btn = e.target.closest("button");
+            if (!btn) return;
+            const on = btn.dataset.remember === "1";
+            applyRememberMode(on, false);
+            showToast(on ? "📌 이름·소속을 고정합니다" : "🔄 다음 방문부터 비웁니다");
         });
 
         // 관리자 사진 업로드(다중)
@@ -703,6 +721,46 @@
             document.body.classList.remove("printing-postit", "printing-report");
             document.getElementById("printLayer").innerHTML = "";
         });
+    }
+
+    /* =========================================================
+       이름·소속 기억 방식 (고정 / 매번 리셋)
+       ========================================================= */
+    function isRemember() {
+        try { return (localStorage.getItem(LS.remember) ?? "1") !== "0"; }
+        catch (_) { return true; }
+    }
+
+    function applyRememberMode(remember, initial) {
+        try { localStorage.setItem(LS.remember, remember ? "1" : "0"); } catch (_) { }
+
+        // 세그먼트 활성 표시
+        document.querySelectorAll("#rememberSeg button").forEach((b) =>
+            b.classList.toggle("active", (b.dataset.remember === "1") === remember));
+
+        const nameEl = document.getElementById("userName");
+        const orgEl = document.getElementById("userOrg");
+
+        if (remember) {
+            if (initial) {
+                // 첫 로드: 저장된 값 복원
+                try {
+                    nameEl.value = localStorage.getItem(LS.name) || "";
+                    orgEl.value = localStorage.getItem(LS.org) || "";
+                } catch (_) { }
+            } else {
+                // 토글로 켤 때: 현재 입력값을 기억
+                try {
+                    localStorage.setItem(LS.name, nameEl.value.trim());
+                    localStorage.setItem(LS.org, orgEl.value.trim());
+                } catch (_) { }
+            }
+        } else {
+            // 매번 리셋: 저장값 제거. 첫 로드면 빈 칸으로 시작.
+            try { localStorage.removeItem(LS.name); localStorage.removeItem(LS.org); } catch (_) { }
+            if (initial) { nameEl.value = ""; orgEl.value = ""; }
+        }
+        updateSubmitBar();
     }
 
     /* =========================================================
@@ -1123,10 +1181,12 @@
         if (!name) { showToast("이름을 입력해 주세요"); nameEl.focus(); return; }
         if (issues.length === 0) { showToast("위험요인을 1개 이상 표시해 주세요"); return; }
 
-        try {
-            localStorage.setItem(LS.name, name);
-            localStorage.setItem(LS.org, org);
-        } catch (_) { }
+        if (isRemember()) {
+            try {
+                localStorage.setItem(LS.name, name);
+                localStorage.setItem(LS.org, org);
+            } catch (_) { }
+        }
 
         const dup = entryList.find((it) => it.name === name && it.org === org && it.photo === currentPhoto);
 
