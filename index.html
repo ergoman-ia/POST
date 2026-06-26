@@ -16,7 +16,7 @@
         import { initializeApp } from "https://www.gstatic.com/firebasejs/12.14.0/firebase-app.js";
         import { getAuth, signInAnonymously } from "https://www.gstatic.com/firebasejs/12.14.0/firebase-auth.js";
         import {
-            getFirestore, collection, addDoc, getDocs, doc, deleteDoc, updateDoc,
+            getFirestore, initializeFirestore, collection, addDoc, getDocs, doc, deleteDoc, updateDoc,
             setDoc, query, orderBy, getDoc, where, onSnapshot
         } from "https://www.gstatic.com/firebasejs/12.14.0/firebase-firestore.js";
 
@@ -26,7 +26,15 @@
         window.ADMIN_PASSWORD = ADMIN_PASSWORD;
 
         const app = initializeApp(FIREBASE_CONFIG);
-        const db = getFirestore(app);
+        // 모바일/제한적 네트워크에서 실시간 연결(WebChannel)이 막혀 멈추는 문제 방지:
+        // 롱폴링 자동감지로 더 안정적으로 연결한다. 초기화 실패 시 기본 방식으로 폴백.
+        let db;
+        try {
+            db = initializeFirestore(app, { experimentalAutoDetectLongPolling: true });
+        } catch (e) {
+            console.warn("initializeFirestore 폴백:", e);
+            db = getFirestore(app);
+        }
 
         // 일반 스크립트에서 사용하기 위해 window에 등록
         window.fs = { db, collection, addDoc, getDocs, doc, deleteDoc, updateDoc, setDoc, query, orderBy, getDoc, where, onSnapshot };
@@ -153,6 +161,11 @@
         input:focus, textarea:focus { outline: none; border-color: var(--primary); box-shadow: 0 0 0 3px var(--primary-soft); }
         .grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
         @media (max-width: 620px) { .grid-2 { grid-template-columns: 1fr; } }
+        /* 이름/소속은 휴대폰에서도 한 줄(2칸)로 유지 */
+        @media (max-width: 620px) {
+            #nameOrgGrid { grid-template-columns: 1fr 1fr; gap: 8px; }
+            #nameOrgGrid input { padding: 11px 10px; font-size: .95rem; }
+        }
 
         /* ===== 사용자 갤러리 ===== */
         .gallery-grid {
@@ -418,7 +431,7 @@
                         </div>
                         <div>
                             <input type="file" id="userJsonLoad" hidden accept=".json">
-                            <button id="btnUserLoad" class="btn btn-ghost btn-sm"
+                            <button id="btnUserLoad" class="btn btn-ghost btn-sm pc-only"
                                 onclick="document.getElementById('userJsonLoad').click()">📂 저장한 점검 불러오기</button>
                         </div>
                     </div>
@@ -460,7 +473,7 @@
 
                     <ul id="issueList" class="issue-list"></ul>
 
-                    <div class="grid-2" style="margin-top:16px; padding-top:16px; border-top:1px dashed var(--line);">
+                    <div class="grid-2" id="nameOrgGrid" style="margin-top:16px; padding-top:16px; border-top:1px dashed var(--line);">
                         <div class="field">
                             <label for="userName">이름</label>
                             <input type="text" id="userName" placeholder="예: 홍길동">
@@ -659,11 +672,10 @@
         // 사진 스테이지 클릭 → 핀
         document.getElementById("stage").addEventListener("click", onStageClick);
 
-        // 이름/소속 입력 시 기억 + 동료 갱신
+        // 이름/소속 입력 시 기억(자동완성 편의용). 더 이상 동료 결과 노출에 영향 없음.
         ["userName", "userOrg"].forEach((id) => {
             document.getElementById(id).addEventListener("input", (e) => {
                 try { localStorage.setItem(id === "userName" ? LS.name : LS.org, e.target.value); } catch (_) { }
-                if (currentPhoto) loadPeerReviews(currentPhoto);
                 updateSubmitBar();
             });
         });
@@ -733,33 +745,106 @@
     }
 
     /* =========================================================
-       실시간 동기화
+       실시간 동기화 (모바일 안정화: 폴백 + 재시도)
        ========================================================= */
-    function watchGallery() {
+    let _galleryReady = false;
+    let _dataReady = false;
+    let _galleryUnsub = null;
+    let _dataUnsub = null;
+
+    // 1회성 읽기 (실시간 연결이 늦거나 실패할 때 화면을 채워준다)
+    async function oneShotLoad(q, getDocs, apply, onFail) {
         try {
-            const { db, collection, query, orderBy, onSnapshot } = window.fs;
-            const q = query(collection(db, "site_photos"), orderBy("timestamp", "desc"));
-            onSnapshot(q, (snap) => {
-                photoList = [];
-                snap.forEach((d) => photoList.push({ id: d.id, ...d.data() }));
-                renderUserGallery();
-                renderAdminGallery();
+            const snap = await getDocs(q);
+            apply(snap);
+        } catch (e) {
+            console.error("1회성 로드 실패:", e);
+            if (onFail) onFail();
+        }
+    }
+
+    function showGalleryError() {
+        if (_galleryReady) return;
+        const html = `<div class="empty-state">사진을 불러오지 못했습니다.<br>
+            네트워크 상태를 확인한 뒤 다시 시도해 주세요.<br>
+            <button class="btn btn-soft btn-sm" style="margin-top:10px;" onclick="App.retryLoad()">🔄 다시 시도</button></div>`;
+        const ug = document.getElementById("userGallery");
+        if (ug) ug.innerHTML = html;
+        const ag = document.getElementById("adminGallery");
+        if (ag) ag.innerHTML = `<div class="empty-state" style="width:100%;">불러오지 못했습니다. <button class="btn btn-soft btn-sm" onclick="App.retryLoad()">🔄 다시 시도</button></div>`;
+    }
+
+    function watchGallery() {
+        const { db, collection, query, orderBy, onSnapshot, getDocs } = window.fs;
+        const q = query(collection(db, "site_photos"), orderBy("timestamp", "desc"));
+
+        const apply = (snap) => {
+            photoList = [];
+            snap.forEach((d) => photoList.push({ id: d.id, ...d.data() }));
+            _galleryReady = true;
+            renderUserGallery();
+            renderAdminGallery();
+        };
+
+        if (_galleryUnsub) { try { _galleryUnsub(); } catch (_) { } }
+
+        // 실시간 동기화 (오류 콜백 포함)
+        try {
+            _galleryUnsub = onSnapshot(q, apply, (err) => {
+                console.error("갤러리 실시간 동기화 오류:", err);
+                oneShotLoad(q, getDocs, apply, showGalleryError);
             });
-        } catch (e) { console.error("갤러리 동기화 실패:", e); }
+        } catch (e) {
+            console.error(e);
+            oneShotLoad(q, getDocs, apply, showGalleryError);
+        }
+
+        // 안전망: 일정 시간 내 응답이 없으면 1회성 읽기로 화면을 채운다
+        setTimeout(() => {
+            if (!_galleryReady) oneShotLoad(q, getDocs, apply, showGalleryError);
+        }, 4500);
     }
 
     function watchData() {
+        const { db, collection, query, orderBy, onSnapshot, getDocs } = window.fs;
+        const q = query(collection(db, "inspections"), orderBy("timestamp", "desc"));
+
+        const apply = (snap) => {
+            entryList = [];
+            snap.forEach((d) => entryList.push({ dbId: d.id, ...d.data() }));
+            _dataReady = true;
+            renderTable();
+            renderUserGallery();
+            if (currentPhoto) loadPeerReviews(currentPhoto);
+        };
+
+        if (_dataUnsub) { try { _dataUnsub(); } catch (_) { } }
+
         try {
-            const { db, collection, query, orderBy, onSnapshot } = window.fs;
-            const q = query(collection(db, "inspections"), orderBy("timestamp", "desc"));
-            onSnapshot(q, (snap) => {
-                entryList = [];
-                snap.forEach((d) => entryList.push({ dbId: d.id, ...d.data() }));
-                renderTable();
-                renderUserGallery();
-                if (currentPhoto) loadPeerReviews(currentPhoto);
+            _dataUnsub = onSnapshot(q, apply, (err) => {
+                console.error("데이터 실시간 동기화 오류:", err);
+                oneShotLoad(q, getDocs, apply);
             });
-        } catch (e) { console.error("데이터 동기화 실패:", e); }
+        } catch (e) {
+            console.error(e);
+            oneShotLoad(q, getDocs, apply);
+        }
+
+        setTimeout(() => {
+            if (!_dataReady) oneShotLoad(q, getDocs, apply);
+        }, 4500);
+    }
+
+    // 수동 재시도 (오류 화면의 버튼)
+    function retryLoad() {
+        _galleryReady = false;
+        _dataReady = false;
+        const ug = document.getElementById("userGallery");
+        if (ug) ug.innerHTML = `<div class="empty-state">사진을 불러오는 중…</div>`;
+        const ag = document.getElementById("adminGallery");
+        if (ag) ag.innerHTML = `<div class="empty-state">불러오는 중…</div>`;
+        watchGallery();
+        watchData();
     }
 
     /* =========================================================
@@ -967,12 +1052,10 @@
         const box = document.getElementById("peerBox");
         const badges = document.getElementById("peerBadges");
         const head = document.getElementById("peerHead");
-        const myName = document.getElementById("userName").value.trim();
-        const myOrg = document.getElementById("userOrg").value.trim();
 
-        const peers = entryList
-            .filter((it) => it.photo === imageSrc)
-            .filter((it) => !(it.name === myName && it.org === myOrg));
+        // 브라우저에 저장된 이름/소속으로 "본인 결과 숨김"을 하지 않는다.
+        // → 어느 기기/브라우저에서 보든 모든 분석자의 결과가 동일하게 보인다.
+        const peers = entryList.filter((it) => it.photo === imageSrc);
 
         if (peers.length === 0) { box.style.display = "none"; return; }
 
@@ -1789,7 +1872,7 @@ ${JSON.stringify(issuesArr)}
         closePeerModal, submitEntry, backupMine,
         selectAll, clearFilter, printAll, printReport, analyze, closeModal,
         saveReGrouped, showReport, modifyReGroup, resetReGroup,
-        renderTable
+        renderTable, retryLoad
     };
 })();
 
