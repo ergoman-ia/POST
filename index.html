@@ -678,7 +678,61 @@
 
         watchGallery();
         watchData();
+
+        // 백그라운드 복귀 시 재연결 핸들러 등록
+        wireVisibilityRecovery();
     });
+
+    /* =========================================================
+       백그라운드 복귀 시 재연결
+       (Brave/Chromium 모바일이 백그라운드 탭을 freeze 하면서
+        Firestore 실시간 연결을 끊어버려 무한 로딩에 빠지는 문제 대응)
+       ========================================================= */
+    let _wasHidden = false;
+    let _lastReconnect = 0;
+
+    function softReconnect(reason) {
+        if (!window.fs || !window.fs.db) return;
+        // 너무 잦은 재연결 방지(최소 1.5초 간격)
+        const now = Date.now();
+        if (now - _lastReconnect < 1500) return;
+        _lastReconnect = now;
+
+        console.log("[점검앱] 재연결 시도:", reason);
+
+        // 아직 화면이 안 채워진 상태라면 로딩 표시를 되살려
+        // watchGallery 내부의 안전망 타이머(4.5초/12초)가 다시 작동하도록 한다.
+        if (!_galleryReady) {
+            const ug = document.getElementById("userGallery");
+            if (ug) ug.innerHTML =
+                `<div class="empty-state">사진을 불러오는 중… <small style="opacity:.5">(v3)</small></div>`;
+            const ag = document.getElementById("adminGallery");
+            if (ag) ag.innerHTML = `<div class="empty-state">불러오는 중…</div>`;
+        }
+
+        // watchGallery/watchData는 내부에서 기존 리스너를 정리(unsub)한 뒤
+        // 재구독하고 안전망 타이머도 새로 건다 → 죽은 연결을 안전하게 되살린다.
+        watchGallery();
+        watchData();
+    }
+
+    function wireVisibilityRecovery() {
+        // 탭이 다시 보이게 됐을 때
+        document.addEventListener("visibilitychange", () => {
+            if (document.visibilityState === "hidden") { _wasHidden = true; return; }
+            if (_wasHidden) { _wasHidden = false; softReconnect("visibilitychange"); }
+        });
+
+        // bfcache(뒤로가기/탭 복원)에서 페이지가 되살아난 경우
+        window.addEventListener("pageshow", (e) => {
+            if (e.persisted) softReconnect("pageshow(bfcache)");
+        });
+
+        // 일부 모바일 브라우저는 visibilitychange 없이 focus만 주기도 한다(보조).
+        window.addEventListener("focus", () => {
+            if (_wasHidden) { _wasHidden = false; softReconnect("focus"); }
+        });
+    }
 
     function wireEvents() {
         // 모드 전환
