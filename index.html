@@ -14,7 +14,7 @@
     <!-- ===== Firebase + Gemini 초기화 (기존 흐름 유지) ===== -->
     <script type="module">
         import { initializeApp } from "https://www.gstatic.com/firebasejs/12.14.0/firebase-app.js";
-        import { getAuth, signInAnonymously } from "https://www.gstatic.com/firebasejs/12.14.0/firebase-auth.js";
+        import { getAuth, signInAnonymously, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/12.14.0/firebase-auth.js";
         import {
             getFirestore, initializeFirestore, collection, addDoc, getDocs, doc, deleteDoc, updateDoc,
             setDoc, query, orderBy, getDoc, where, onSnapshot, enableNetwork, disableNetwork, writeBatch
@@ -42,9 +42,24 @@
         window.fs = { db, collection, addDoc, getDocs, doc, deleteDoc, updateDoc, setDoc, query, orderBy, getDoc, where, onSnapshot, enableNetwork, disableNetwork, writeBatch };
         window.dispatchEvent(new Event("fs-ready"));
 
-        signInAnonymously(getAuth())
+        const auth = getAuth();
+
+        // 인증 상태 변화를 앱에 알린다.
+        // (Brave 콜드 스타트처럼 익명 로그인이 늦게 끝나는 경우, 인증이 완료된
+        //  뒤에 데이터 읽기를 다시 시도하도록 신호를 보낸다.)
+        window.__authReady = false;
+        onAuthStateChanged(auth, (user) => {
+            window.__authReady = !!user;
+            window.dispatchEvent(new CustomEvent("auth-changed", { detail: { signedIn: !!user } }));
+        });
+
+        signInAnonymously(auth)
             .then(() => console.log("익명 로그인 성공"))
-            .catch((e) => console.error("로그인 실패:", e));
+            .catch((e) => {
+                console.error("로그인 실패:", e);
+                window.__authError = (e && e.message) || String(e);
+                window.dispatchEvent(new CustomEvent("auth-changed", { detail: { signedIn: false, error: window.__authError } }));
+            });
     </script>
 
     <style>
@@ -697,7 +712,26 @@
 
         // 백그라운드 복귀 시 재연결 핸들러 등록
         wireVisibilityRecovery();
+        // 인증(익명 로그인)이 늦게 끝나는 경우 데이터 재로드 핸들러 등록
+        wireAuthReload();
     });
+
+    /* =========================================================
+       인증 지연 대응 (Brave 콜드 스타트)
+       익명 로그인이 첫 읽기보다 늦게 끝나면, 인증이 필요한 보안 규칙에서는
+       첫 읽기가 응답 없이 멈춰(시간 초과) 버린다. 인증이 완료되는 순간
+       아직 화면이 안 채워졌다면 읽기를 다시 시도한다.
+       ========================================================= */
+    function wireAuthReload() {
+        window.addEventListener("auth-changed", (e) => {
+            const d = e && e.detail;
+            if (d && d.signedIn && (!_galleryReady || !_dataReady)) {
+                console.log("[점검앱] 인증 완료 후 데이터 재로드");
+                watchGallery();
+                watchData();
+            }
+        });
+    }
 
     /* =========================================================
        백그라운드 복귀 시 재연결
@@ -919,7 +953,7 @@
     // 1회성 읽기 (실시간 연결이 늦거나 실패할 때 화면을 채워준다)
     async function oneShotLoad(q, getDocs, apply, onFail) {
         try {
-            const snap = await withTimeout(getDocs(q), 8000, "사진 읽기");
+            const snap = await withTimeout(getDocs(q), 12000, "사진 읽기");
             apply(snap);
         } catch (e) {
             console.error("1회성 로드 실패:", e);
@@ -928,8 +962,19 @@
         }
     }
 
+    let _autoHealTried = false;
     function showGalleryError() {
         if (_galleryReady) return;
+
+        // 콜드 스타트(특히 Brave): 첫 실패 시 한 번은 자동으로 연결을 리셋하고
+        // 다시 시도한다. 사용자가 직접 '다시 시도'를 누르지 않아도 스스로 복구된다.
+        if (!_autoHealTried) {
+            _autoHealTried = true;
+            console.log("[점검앱] 자동 복구 1회 시도");
+            retryLoad();   // 내부에서 연결 리셋 + 재구독 + 안전망 재무장
+            return;
+        }
+
         const detail = _lastLoadError
             ? `<br><small style="color:var(--danger); word-break:break-all;">사유: ${esc(_lastLoadError)}</small>`
             : "";
@@ -951,6 +996,7 @@
             snap.forEach((d) => photoList.push({ id: d.id, ...d.data() }));
             photoList.sort((a, b) => effOrder(a) - effOrder(b));
             _galleryReady = true;
+            _autoHealTried = false;   // 정상 로드되면 자동복구 카운터 초기화
             renderUserGallery();
             renderAdminGallery();
         };
@@ -975,10 +1021,11 @@
             if (!_galleryReady) oneShotLoad(q, getDocs, apply, showGalleryError);
         }, 4500);
 
-        // 최종 안전망: 무슨 일이 있어도(읽기가 응답 없이 멈춰도) 12초 뒤엔 오류 화면을 띄운다
+        // 최종 안전망: 무슨 일이 있어도(읽기가 응답 없이 멈춰도) 20초 뒤엔
+        // 자동 복구(1회) 또는 오류 화면을 띄운다.
         setTimeout(() => {
             if (!_galleryReady) showGalleryError();
-        }, 12000);
+        }, 20000);
     }
 
     function watchData() {
