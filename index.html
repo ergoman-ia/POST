@@ -1067,12 +1067,35 @@
        (보안 규칙의 'allow write: if request.auth != null'을 그대로 만족)
        ========================================================= */
     let _restToken = null, _restTokenExp = 0;
+    const REST_RT_KEY = "rest_anon_refresh";   // 익명 계정 refresh token 저장 키
     async function restAuthToken() {
         const cfg = window.FB || {};
         if (!cfg.apiKey) throw new Error("apiKey 없음");
         if (_restToken && Date.now() < _restTokenExp - 60000) return _restToken;
-        const url = `https://identitytoolkit.googleapis.com/v1/accounts:signUp?key=${encodeURIComponent(cfg.apiKey)}`;
-        const res = await withTimeout(fetch(url, {
+
+        // 1) 저장된 refresh token이 있으면 그것으로 새 토큰을 교환한다(같은 익명 계정 재사용 → 계정 누적 방지)
+        let rt = null;
+        try { rt = localStorage.getItem(REST_RT_KEY); } catch (_) { }
+        if (rt) {
+            try {
+                const r = await withTimeout(fetch(`https://securetoken.googleapis.com/v1/token?key=${encodeURIComponent(cfg.apiKey)}`, {
+                    method: "POST", headers: { "Content-Type": "application/x-www-form-urlencoded" },
+                    body: "grant_type=refresh_token&refresh_token=" + encodeURIComponent(rt)
+                }), 12000, "토큰 갱신");
+                if (r.ok) {
+                    const j = await r.json();
+                    _restToken = j.id_token || j.access_token;
+                    _restTokenExp = Date.now() + (Number(j.expires_in || 3600) * 1000);
+                    if (j.refresh_token) { try { localStorage.setItem(REST_RT_KEY, j.refresh_token); } catch (_) { } }
+                    if (_restToken) return _restToken;
+                } else {
+                    try { localStorage.removeItem(REST_RT_KEY); } catch (_) { }   // 만료/무효 → 새로 발급
+                }
+            } catch (e) { console.warn("토큰 갱신 실패 → 새 익명 로그인:", e); }
+        }
+
+        // 2) 없으면 익명 계정을 1개 만들고 refresh token을 저장한다(다음부터는 위 경로로 재사용)
+        const res = await withTimeout(fetch(`https://identitytoolkit.googleapis.com/v1/accounts:signUp?key=${encodeURIComponent(cfg.apiKey)}`, {
             method: "POST", headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ returnSecureToken: true })
         }), 12000, "REST 로그인");
@@ -1080,6 +1103,7 @@
         const j = await res.json();
         _restToken = j.idToken;
         _restTokenExp = Date.now() + (Number(j.expiresIn || 3600) * 1000);
+        try { if (j.refreshToken) localStorage.setItem(REST_RT_KEY, j.refreshToken); } catch (_) { }
         return _restToken;
     }
     function toRestVal(v) {
