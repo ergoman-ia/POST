@@ -439,7 +439,7 @@
     <!-- ===== 상단 바 ===== -->
     <header class="topbar">
         <div class="topbar-inner">
-            <div class="brand"><span class="dot"></span> 현장 사진에서 위험요인 점검</div>
+            <div class="brand"><span class="dot"></span> 현장 사진으로 위험요인 점검</div>
             <div class="seg" id="modeSeg">
                 <button class="user active" data-mode="user">👤 분석자</button>
                 <button class="admin" data-mode="admin">🔐 관리자</button>
@@ -990,11 +990,88 @@
             : "";
         const html = `<div class="empty-state">사진을 불러오지 못했습니다.<br>
             네트워크·로그인·접근권한을 확인한 뒤 다시 시도해 주세요.${detail}<br>
-            <button class="btn btn-soft btn-sm" style="margin-top:10px;" onclick="App.retryLoad()">🔄 다시 시도</button></div>`;
+            <button class="btn btn-soft btn-sm" style="margin-top:10px;" onclick="App.retryLoad()">🔄 다시 시도</button>
+            <button class="btn btn-ghost btn-sm" style="margin-top:10px;" onclick="App.runDiagnostics()">🔍 원인 진단</button></div>`;
         const ug = document.getElementById("userGallery");
         if (ug) ug.innerHTML = html;
         const ag = document.getElementById("adminGallery");
-        if (ag) ag.innerHTML = `<div class="empty-state" style="width:100%;">불러오지 못했습니다.${detail} <button class="btn btn-soft btn-sm" onclick="App.retryLoad()">🔄 다시 시도</button></div>`;
+        if (ag) ag.innerHTML = `<div class="empty-state" style="width:100%;">불러오지 못했습니다.${detail} <button class="btn btn-soft btn-sm" onclick="App.retryLoad()">🔄 다시 시도</button> <button class="btn btn-ghost btn-sm" onclick="App.runDiagnostics()">🔍 원인 진단</button></div>`;
+    }
+
+    /* =========================================================
+       원인 진단 — 콜드 스타트에서 무엇이 막히는지 정확히 보여준다.
+       (네트워크 / 브라우저 저장소 / 익명 로그인 / Firestore 읽기)
+       ========================================================= */
+    function checkIDB() {
+        return new Promise((resolve) => {
+            let done = false; const fin = (v) => { if (!done) { done = true; resolve(v); } };
+            try {
+                const req = indexedDB.open("__diag__" + Date.now());
+                req.onsuccess = () => { try { req.result.close(); } catch (_) { } fin("사용 가능"); };
+                req.onerror = () => fin("오류/차단됨");
+                req.onblocked = () => fin("blocked");
+                setTimeout(() => fin("응답 없음(차단 가능성 높음)"), 2500);
+            } catch (e) { fin("예외: " + (e.message || e)); }
+        });
+    }
+
+    async function runDiagnostics() {
+        const rows = [];
+        const add = (label, val, bad) => rows.push(
+            `<div style="display:flex;gap:8px;justify-content:space-between;padding:6px 0;border-top:1px solid var(--line);">
+               <span style="color:var(--muted);">${esc(label)}</span>
+               <b style="color:${bad ? "var(--danger)" : "var(--ink)"};text-align:right;word-break:break-all;">${esc(String(val))}</b>
+             </div>`);
+
+        const ug = document.getElementById("userGallery");
+        const ag = document.getElementById("adminGallery");
+        const loading = `<div class="empty-state">🔍 진단 중… 잠시만요</div>`;
+        if (ug) ug.innerHTML = loading;
+        if (ag) ag.innerHTML = loading;
+
+        add("네트워크", navigator.onLine ? "온라인" : "오프라인", !navigator.onLine);
+        add("브라우저", (navigator.userAgent.match(/Brave|CriOS|EdgiOS|FxiOS|Chrome|Safari/)?.[0]) || "알 수 없음");
+        const idb = await checkIDB();
+        add("저장소(IndexedDB)", idb, idb !== "사용 가능");
+        const authOk = !!window.__authReady;
+        add("익명 로그인", authOk ? "성공" : ("미완료" + (window.__authError ? "" : " (응답 없음)")), !authOk);
+        if (window.__authError) add("로그인 오류", window.__authError, true);
+
+        // 실제 읽기 1회 시도 — Firestore 오류 코드까지 잡는다(가장 결정적 단서)
+        let readMsg = "건너뜀(window.fs 없음)", readBad = true;
+        if (window.fs && window.fs.db) {
+            try {
+                const { db, collection, query, orderBy, getDocs } = window.fs;
+                const q = query(collection(db, "site_photos"), orderBy("timestamp", "desc"));
+                const t0 = Date.now();
+                const snap = await withTimeout(getDocs(q), 12000, "읽기");
+                readMsg = `성공 — ${snap.size}장, ${Date.now() - t0}ms`; readBad = false;
+            } catch (e) {
+                readMsg = `실패 — 코드:${e.code || "?"} / ${(e.message || e)}`; readBad = true;
+            }
+        }
+        add("Firestore 읽기", readMsg, readBad);
+
+        // 해석 한 줄
+        let verdict = "원인 불명 — 위 결과를 캡처해 공유해 주세요.";
+        if (!navigator.onLine) verdict = "네트워크가 끊겨 있습니다.";
+        else if (idb !== "사용 가능") verdict = "Brave가 저장소를 차단해 로그인이 유지되지 않습니다 → Shields를 이 사이트에서 끄거나, 읽기에 로그인을 요구하지 않도록 보안 규칙을 바꿔야 합니다.";
+        else if (!authOk) verdict = "익명 로그인이 막혀 있습니다(주로 Brave Shields) → Shields를 끄거나 보안 규칙을 공개 읽기로 바꾸면 해결됩니다.";
+        else if (readBad && /permission|insufficient|unauth/i.test(readMsg)) verdict = "로그인은 됐지만 보안 규칙이 읽기를 거부합니다 → Firestore 규칙을 확인하세요.";
+        else if (readBad) verdict = "연결/전송이 막혀 읽기가 실패합니다(Shields 또는 네트워크).";
+        else verdict = "진단에서는 읽기가 성공했습니다 → 최초 로딩 타이밍 문제일 수 있으니, 이 상태에서 '다시 시도'를 누르면 화면이 채워질 것입니다.";
+
+        const panel = `<div class="empty-state" style="text-align:left;max-width:520px;width:100%;">
+            <div style="font-weight:700;margin-bottom:4px;">🔍 진단 결과</div>
+            ${rows.join("")}
+            <div style="margin-top:10px;padding:10px;background:var(--primary-soft);border-radius:8px;color:var(--ink);font-size:.86rem;">${esc(verdict)}</div>
+            <div style="margin-top:10px;display:flex;gap:8px;flex-wrap:wrap;">
+              <button class="btn btn-soft btn-sm" onclick="App.retryLoad()">🔄 다시 시도</button>
+              <button class="btn btn-ghost btn-sm" onclick="App.runDiagnostics()">🔁 다시 진단</button>
+            </div>
+        </div>`;
+        if (ug) ug.innerHTML = panel;
+        if (ag) ag.innerHTML = panel;
     }
 
     function watchGallery() {
@@ -1438,7 +1515,7 @@
                         <img src="${p.image}" alt="현장 사진" draggable="false">
                         <button class="ctl vis" data-id="${p.id}" data-hidden="${hidden}" title="노출/숨김">${hidden ? "🙈" : "👁️"}</button>
                         <button class="ctl rm" data-rm="${p.id}" title="삭제">×</button>
-                        <div class="drag-handle" title="끌어서 순서 변경">⠿</div>
+                        <div class="drag-handle" title="끌어서 순서 변경">⠿ 이동</div>
                     </div>`;
         }).join("");
         wrap.querySelectorAll(".vis").forEach((b) =>
@@ -2257,7 +2334,7 @@ ${JSON.stringify(issuesArr)}
         closePeerModal, submitEntry, backupMine,
         selectAll, clearFilter, printAll, printReport, analyze, closeModal,
         saveReGrouped, showReport, modifyReGroup, resetReGroup,
-        renderTable, retryLoad
+        renderTable, retryLoad, runDiagnostics
     };
 })();
 
