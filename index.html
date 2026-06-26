@@ -17,7 +17,7 @@
         import { getAuth, signInAnonymously } from "https://www.gstatic.com/firebasejs/12.14.0/firebase-auth.js";
         import {
             getFirestore, initializeFirestore, collection, addDoc, getDocs, doc, deleteDoc, updateDoc,
-            setDoc, query, orderBy, getDoc, where, onSnapshot
+            setDoc, query, orderBy, getDoc, where, onSnapshot, enableNetwork, disableNetwork
         } from "https://www.gstatic.com/firebasejs/12.14.0/firebase-firestore.js";
 
         import { FIREBASE_CONFIG, GEMINI_API_KEY, ADMIN_PASSWORD } from "./secrets.js";
@@ -26,18 +26,20 @@
         window.ADMIN_PASSWORD = ADMIN_PASSWORD;
 
         const app = initializeApp(FIREBASE_CONFIG);
-        // 모바일/제한적 네트워크에서 실시간 연결(WebChannel)이 막혀 멈추는 문제 방지:
-        // 롱폴링 자동감지로 더 안정적으로 연결한다. 초기화 실패 시 기본 방식으로 폴백.
+        // 모바일/제한적 네트워크(Brave 등 프라이버시 브라우저, 프록시) 환경에서
+        // 실시간 스트리밍(WebChannel)이 막히거나, 백그라운드 freeze 후 연결이
+        // 죽은 채로 굳어 읽기가 멈추는 문제를 방지하기 위해 '강제 롱폴링'을 쓴다.
+        // (롱폴링은 일반 HTTP 요청 기반이라 끊겨도 다음 요청에서 깔끔히 복구된다.)
         let db;
         try {
-            db = initializeFirestore(app, { experimentalAutoDetectLongPolling: true });
+            db = initializeFirestore(app, { experimentalForceLongPolling: true });
         } catch (e) {
             console.warn("initializeFirestore 폴백:", e);
             db = getFirestore(app);
         }
 
         // 일반 스크립트에서 사용하기 위해 window에 등록
-        window.fs = { db, collection, addDoc, getDocs, doc, deleteDoc, updateDoc, setDoc, query, orderBy, getDoc, where, onSnapshot };
+        window.fs = { db, collection, addDoc, getDocs, doc, deleteDoc, updateDoc, setDoc, query, orderBy, getDoc, where, onSnapshot, enableNetwork, disableNetwork };
         window.dispatchEvent(new Event("fs-ready"));
 
         signInAnonymously(getAuth())
@@ -690,13 +692,16 @@
        ========================================================= */
     let _wasHidden = false;
     let _lastReconnect = 0;
+    let _reconnecting = false;
 
-    function softReconnect(reason) {
+    async function softReconnect(reason) {
         if (!window.fs || !window.fs.db) return;
+        if (_reconnecting) return;
         // 너무 잦은 재연결 방지(최소 1.5초 간격)
         const now = Date.now();
         if (now - _lastReconnect < 1500) return;
         _lastReconnect = now;
+        _reconnecting = true;
 
         console.log("[점검앱] 재연결 시도:", reason);
 
@@ -710,10 +715,23 @@
             if (ag) ag.innerHTML = `<div class="empty-state">불러오는 중…</div>`;
         }
 
-        // watchGallery/watchData는 내부에서 기존 리스너를 정리(unsub)한 뒤
-        // 재구독하고 안전망 타이머도 새로 건다 → 죽은 연결을 안전하게 되살린다.
+        // ★ 핵심: 백그라운드 freeze로 죽어 굳어버린 연결을 강제로 끊었다 다시 켠다.
+        // 같은 db 인스턴스를 재사용해도 전송 채널이 새로 만들어져 '읽기 시간 초과'가 해소된다.
+        const { db, enableNetwork, disableNetwork } = window.fs;
+        try {
+            if (disableNetwork && enableNetwork) {
+                await withTimeout(disableNetwork(db), 4000, "연결 끊기");
+                await withTimeout(enableNetwork(db), 4000, "연결 켜기");
+            }
+        } catch (e) {
+            console.warn("네트워크 리셋 실패(무시하고 재구독 진행):", e);
+        }
+
+        // 연결을 새로 잡은 뒤 재구독 + 안전망 타이머 재무장
         watchGallery();
         watchData();
+
+        _reconnecting = false;
     }
 
     function wireVisibilityRecovery() {
@@ -979,7 +997,7 @@
     }
 
     // 수동 재시도 (오류 화면의 버튼)
-    function retryLoad() {
+    async function retryLoad() {
         _galleryReady = false;
         _dataReady = false;
         _lastLoadError = "";
@@ -987,6 +1005,18 @@
         if (ug) ug.innerHTML = `<div class="empty-state">사진을 불러오는 중… <small style="opacity:.5">(v3)</small></div>`;
         const ag = document.getElementById("adminGallery");
         if (ag) ag.innerHTML = `<div class="empty-state">불러오는 중…</div>`;
+
+        // 굳어버린 연결을 강제 리셋한 뒤 재구독
+        const { db, enableNetwork, disableNetwork } = window.fs || {};
+        try {
+            if (db && disableNetwork && enableNetwork) {
+                await withTimeout(disableNetwork(db), 4000, "연결 끊기");
+                await withTimeout(enableNetwork(db), 4000, "연결 켜기");
+            }
+        } catch (e) {
+            console.warn("재시도 중 네트워크 리셋 실패(무시):", e);
+        }
+
         watchGallery();
         watchData();
     }
