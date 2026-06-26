@@ -299,20 +299,30 @@
         .admin-thumb .ctl { position: absolute; top: 4px; border: none; cursor: pointer; color: #fff; width: 26px; height: 26px; border-radius: 7px; font-size: .8rem; display: flex; align-items: center; justify-content: center; }
         .admin-thumb .vis { left: 4px; background: rgba(71, 85, 105, .9); }
         .admin-thumb .rm { right: 4px; background: rgba(239, 68, 68, .92); }
-        /* 순서 변경 손잡이 (마우스+터치) */
-        .admin-thumb .drag-handle {
+        /* 순서 변경: 썸네일 전체를 끌어서 이동 (마우스+터치) */
+        .admin-thumb { cursor: grab; touch-action: pan-y; }
+        .admin-gallery.dragging-active { cursor: grabbing; }
+        .admin-gallery.dragging-active .admin-thumb { transition: transform .12s ease; }
+        .admin-thumb .drag-handle {   /* 끌 수 있다는 시각적 힌트(클릭 대상 아님) */
             position: absolute; left: 50%; bottom: 4px; transform: translateX(-50%);
-            background: rgba(15, 23, 42, .8); color: #fff; border-radius: 7px;
-            padding: 3px 14px; font-size: .95rem; line-height: 1; letter-spacing: 2px;
-            cursor: grab; touch-action: none; user-select: none; -webkit-user-select: none;
+            background: rgba(15, 23, 42, .6); color: #fff; border-radius: 7px;
+            padding: 2px 12px; font-size: .9rem; line-height: 1; letter-spacing: 2px;
             display: flex; align-items: center; justify-content: center;
+            pointer-events: none; user-select: none; -webkit-user-select: none;
         }
-        .admin-thumb .drag-handle:active { cursor: grabbing; }
         .admin-thumb img { pointer-events: none; }
-        .admin-thumb.dragging {
-            opacity: .9 !important; transform: scale(1.05);
-            box-shadow: var(--shadow-lg); z-index: 5; border-color: var(--admin);
+        /* 끌고 있는 원본 자리(빈칸 표시) */
+        .admin-thumb.dragging-src { opacity: .25; filter: grayscale(.4); }
+        /* 커서/손가락을 따라다니는 떠 있는 복제본 */
+        .drag-ghost {
+            position: fixed; left: 0; top: 0; margin: 0;
+            width: 130px; height: 100px; border-radius: var(--radius-sm); overflow: hidden;
+            border: 2px solid var(--admin); box-shadow: var(--shadow-lg);
+            pointer-events: none; z-index: 9999; opacity: .96;
+            transform: translate(-9999px, -9999px); will-change: transform;
         }
+        .drag-ghost img { width: 100%; height: 100%; object-fit: cover; display: block; }
+        .drag-ghost .ctl, .drag-ghost .drag-handle { display: none; }
 
         .toolbar {
             display: flex; flex-wrap: wrap; gap: 8px; align-items: center;
@@ -537,7 +547,7 @@
 
             <div class="panel">
                 <h3 class="section-title">📸 점검 대상 사진</h3>
-                <p class="section-sub">여러 장 등록할 수 있어요. 👁️는 분석자 화면 노출, 🙈는 숨김입니다. 썸네일 아래 <b>⠿</b> 손잡이를 끌면 표시 순서를 바꿀 수 있어요(앞쪽일수록 분석자 화면 위·좌측에 표시).</p>
+                <p class="section-sub">여러 장 등록할 수 있어요. 👁️는 분석자 화면 노출, 🙈는 숨김입니다. 썸네일을 <b>끌어다 놓으면</b> 표시 순서를 바꿀 수 있어요(앞쪽일수록 분석자 화면 위·좌측에 표시).</p>
                 <div id="adminGallery" class="admin-gallery">
                     <div class="empty-state">불러오는 중…</div>
                 </div>
@@ -1428,7 +1438,7 @@
                         <img src="${p.image}" alt="현장 사진" draggable="false">
                         <button class="ctl vis" data-id="${p.id}" data-hidden="${hidden}" title="노출/숨김">${hidden ? "🙈" : "👁️"}</button>
                         <button class="ctl rm" data-rm="${p.id}" title="삭제">×</button>
-                        <div class="drag-handle" title="끌어서 순서 변경">⠿</div>
+                        <div class="drag-handle" title="끌어서 순서 변경">⠿ 이동</div>
                     </div>`;
         }).join("");
         wrap.querySelectorAll(".vis").forEach((b) =>
@@ -1454,56 +1464,95 @@
         if (!wrap || _sortableBound) return;
         _sortableBound = true;
 
-        let dragEl = null, startX = 0, startY = 0, moved = false, autoScrollTimer = null;
+        let src = null;       // 끌고 있는 원본 썸네일
+        let ghost = null;     // 커서/손가락을 따라다니는 복제본
+        let offX = 0, offY = 0, startX = 0, startY = 0;
+        let pid = null, dragging = false, autoTimer = null;
 
-        function placeByPointer(clientX) {
-            const others = Array.from(wrap.querySelectorAll(".admin-thumb")).filter((t) => t !== dragEl);
+        const stopAuto = () => { if (autoTimer) { clearInterval(autoTimer); autoTimer = null; } };
+
+        function makeGhost(thumb, x, y) {
+            const r = thumb.getBoundingClientRect();
+            offX = x - r.left; offY = y - r.top;
+            ghost = thumb.cloneNode(true);
+            ghost.classList.add("drag-ghost");
+            ghost.classList.remove("dragging-src");
+            ghost.style.width = r.width + "px";
+            ghost.style.height = r.height + "px";
+            document.body.appendChild(ghost);
+            moveGhost(x, y);
+        }
+        function moveGhost(x, y) {
+            if (ghost) ghost.style.transform = `translate(${x - offX}px, ${y - offY}px)`;
+        }
+        // 커서 X 위치 기준으로 원본(빈칸)을 적절한 자리로 옮긴다 → 드롭 위치가 실시간으로 보인다.
+        function reorderByX(x) {
+            const others = Array.from(wrap.querySelectorAll(".admin-thumb")).filter((t) => t !== src);
             for (const t of others) {
                 const r = t.getBoundingClientRect();
-                if (clientX < r.left + r.width / 2) { wrap.insertBefore(dragEl, t); return; }
+                if (x < r.left + r.width / 2) { wrap.insertBefore(src, t); return; }
             }
-            wrap.appendChild(dragEl); // 가장 뒤
+            wrap.appendChild(src);
         }
-        function edgeScroll(clientX) {
-            const r = wrap.getBoundingClientRect(), EDGE = 46, SPEED = 14;
-            let dir = clientX < r.left + EDGE ? -1 : (clientX > r.right - EDGE ? 1 : 0);
-            if (!dir) { stopScroll(); return; }
-            if (autoScrollTimer) return;
-            autoScrollTimer = setInterval(() => { wrap.scrollLeft += dir * SPEED; }, 16);
+        function edgeAuto(x) {
+            const r = wrap.getBoundingClientRect(), EDGE = 50, SPD = 16;
+            const dir = x < r.left + EDGE ? -1 : (x > r.right - EDGE ? 1 : 0);
+            if (!dir) { stopAuto(); return; }
+            if (autoTimer) return;
+            autoTimer = setInterval(() => { wrap.scrollLeft += dir * SPD; }, 16);
         }
-        function stopScroll() { if (autoScrollTimer) { clearInterval(autoScrollTimer); autoScrollTimer = null; } }
+
+        function beginDrag(x, y) {
+            dragging = true;
+            wrap.classList.add("dragging-active");
+            src.classList.add("dragging-src");
+            makeGhost(src, x, y);
+        }
+        function disarm() {
+            window.removeEventListener("pointermove", onMove, true);
+            window.removeEventListener("pointerup", onUp, true);
+            window.removeEventListener("pointercancel", onCancel, true);
+        }
+        function endDrag(commit) {
+            stopAuto(); disarm();
+            const was = dragging, s = src;
+            dragging = false; src = null; pid = null;
+            wrap.classList.remove("dragging-active");
+            if (s) s.classList.remove("dragging-src");
+            if (ghost) { ghost.remove(); ghost = null; }
+            if (was && commit && s) {
+                const ids = Array.from(wrap.querySelectorAll(".admin-thumb")).map((t) => t.dataset.id);
+                persistPhotoOrder(ids);
+            }
+        }
+
+        function onMove(e) {
+            if (pid !== null && e.pointerId !== pid) return;
+            const x = e.clientX, y = e.clientY;
+            if (!dragging) {
+                if (Math.hypot(x - startX, y - startY) < 5) return; // 임계 이동 전엔 대기
+                beginDrag(x, y);
+            }
+            e.preventDefault();
+            moveGhost(x, y);
+            reorderByX(x);
+            edgeAuto(x);
+        }
+        function onUp(e) {
+            if (pid !== null && e.pointerId !== pid) return;
+            endDrag(true);
+        }
+        function onCancel() { endDrag(false); }  // 세로 스크롤 등으로 제스처가 취소되면 원위치
 
         wrap.addEventListener("pointerdown", (e) => {
-            const handle = e.target.closest(".drag-handle");
-            if (!handle) return;                 // 손잡이에서만 드래그 시작 → 평소 스크롤·탭은 그대로
-            const thumb = handle.closest(".admin-thumb");
+            if (e.button != null && e.button > 0) return;   // 마우스는 좌클릭만
+            if (e.target.closest(".ctl")) return;           // 👁️/× 버튼은 드래그 제외
+            const thumb = e.target.closest(".admin-thumb");
             if (!thumb) return;
-            e.preventDefault();
-            dragEl = thumb; startX = e.clientX; startY = e.clientY; moved = false;
-            thumb.classList.add("dragging");
-            try { handle.setPointerCapture(e.pointerId); } catch (_) { }
-
-            const onMove = (ev) => {
-                if (!dragEl) return;
-                if (!moved && Math.hypot(ev.clientX - startX, ev.clientY - startY) < 6) return;
-                moved = true; ev.preventDefault();
-                placeByPointer(ev.clientX);
-                edgeScroll(ev.clientX);
-            };
-            const onUp = async () => {
-                handle.removeEventListener("pointermove", onMove);
-                handle.removeEventListener("pointerup", onUp);
-                handle.removeEventListener("pointercancel", onUp);
-                stopScroll();
-                const el = dragEl; dragEl = null;
-                if (el) el.classList.remove("dragging");
-                if (!moved) return;              // 단순 탭이면 무시
-                const ids = Array.from(wrap.querySelectorAll(".admin-thumb")).map((t) => t.dataset.id);
-                await persistPhotoOrder(ids);
-            };
-            handle.addEventListener("pointermove", onMove);
-            handle.addEventListener("pointerup", onUp);
-            handle.addEventListener("pointercancel", onUp);
+            src = thumb; startX = e.clientX; startY = e.clientY; pid = e.pointerId; dragging = false;
+            window.addEventListener("pointermove", onMove, true);
+            window.addEventListener("pointerup", onUp, true);
+            window.addEventListener("pointercancel", onCancel, true);
         });
     }
 
