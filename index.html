@@ -675,6 +675,9 @@
     let filteredPhoto = null;    // 관리자 사진 필터
     let savedReport = null;      // 재그룹 결과
     let analyzedNames = "";
+    let _lastDataSync = 0;       // 마지막으로 inspections 데이터가 도착한 시각(실시간/REST 공통)
+    let _peerPollTimer = null;   // 작업 화면에서 다른 분석자 결과를 주기적으로 새로고침하는 타이머
+    let _peerSig = "";           // 현재 표시 중인 다른 분석자 결과의 시그니처(불필요한 재렌더 방지)
 
     const LS = {
         name: "inspector_name",
@@ -854,6 +857,12 @@
         window.addEventListener("afterprint", () => {
             document.body.classList.remove("printing-postit", "printing-report");
             document.getElementById("printLayer").innerHTML = "";
+        });
+
+        // 앱/탭으로 다시 돌아왔을 때: 작업 화면이면 다른 분석자 결과를 즉시 최신화한다.
+        // (백그라운드 동안 관리자가 삭제/수정한 내용이 바로 반영되도록)
+        document.addEventListener("visibilitychange", () => {
+            if (!document.hidden && currentPhoto) refreshPeersNow(true);
         });
     }
 
@@ -1035,6 +1044,7 @@
         entryList = docs.map((d) => { const { id, ...rest } = d; return { dbId: id, ...rest }; });
         entryList.sort((a, b) => (b.timestamp || 0) - (a.timestamp || 0));   // 최신 입력순(SDK orderBy와 동일)
         _dataReady = true;
+        _lastDataSync = Date.now();
         renderTable();
         renderUserGallery();
         if (currentPhoto) loadPeerReviews(currentPhoto);
@@ -1317,9 +1327,13 @@
         const q = query(collection(db, "inspections"), orderBy("timestamp", "desc"));
 
         const apply = (snap) => {
+            // 로컬 캐시만 반영된(서버 미반영) 스냅샷은 건너뛴다 — 관리자의 최신 변경이
+            // 누락된 오래된 캐시로 화면을 되돌리지 않도록 한다.
+            try { if (snap.metadata && snap.metadata.fromCache && entryList.length) return; } catch (_) { }
             entryList = [];
             snap.forEach((d) => entryList.push({ dbId: d.id, ...d.data() }));
             _dataReady = true;
+            _lastDataSync = Date.now();
             renderTable();
             renderUserGallery();
             if (currentPhoto) loadPeerReviews(currentPhoto);
@@ -1399,6 +1413,7 @@
     function selectPhoto(src) {
         currentPhoto = src;
         issues = [];
+        _peerSig = "";   // 새 사진 → 시그니처 초기화(첫 렌더가 생략되지 않도록)
         document.getElementById("galleryView").style.display = "none";
         document.getElementById("workView").style.display = "block";
         renderStage();
@@ -1406,14 +1421,18 @@
         loadPeerReviews(src);
         updateSubmitBar();
         window.scrollTo({ top: 0, behavior: "smooth" });
+        startPeerPolling();        // 작업 화면에 머무는 동안 다른 분석자 결과를 최신으로 유지
+        refreshPeersNow(true);     // 진입 즉시 서버에서 한 번 최신화
     }
 
     function backToGallery() {
+        stopPeerPolling();
         document.getElementById("quickInput").value = "";
         document.getElementById("workView").style.display = "none";
         document.getElementById("galleryView").style.display = "block";
         currentPhoto = null;
         issues = [];
+        _peerSig = "";
         hideSubmitBar();
     }
 
@@ -1583,10 +1602,19 @@
         // → 어느 기기/브라우저에서 보든 모든 분석자의 결과가 동일하게 보인다.
         const peers = entryList.filter((it) => it.photo === imageSrc);
 
+        // 내용이 바뀌지 않았으면 다시 그리지 않는다(주기적 새로고침 시 깜빡임/탭 방해 방지).
+        const sig = peers.map((p) => (p.dbId || p.id) + ":" + (p.timestamp || 0) + ":" + ((p.issues || []).length)).join("|");
+        if (sig === _peerSig && box.style.display !== "none") return;
+        _peerSig = sig;
+
         if (peers.length === 0) { box.style.display = "none"; return; }
 
         box.style.display = "block";
-        head.innerHTML = `💡 다른 분석자들의 결과 <b style="color:var(--primary)">${peers.length}건</b> · 눌러서 참고`;
+        head.innerHTML = `💡 다른 분석자들의 결과 <b style="color:var(--primary)">${peers.length}건</b> · 눌러서 참고`
+            + ` <button type="button" id="peerRefreshBtn" title="최신으로 새로고침"
+                 style="margin-left:auto; border:none; background:transparent; cursor:pointer; font-size:.9rem;">🔄</button>`;
+        const rb = document.getElementById("peerRefreshBtn");
+        if (rb) rb.addEventListener("click", (e) => { e.stopPropagation(); refreshPeersNow(true); });
         badges.innerHTML = "";
         peers.forEach((data, i) => {
             const b = document.createElement("span");
@@ -1595,6 +1623,34 @@
             b.addEventListener("click", () => showPeerModal(data, `분석자 ${i + 1}`));
             badges.appendChild(b);
         });
+    }
+
+    /* =========================================================
+       다른 분석자 결과 '실시간' 반영
+       - 실시간 스트리밍(onSnapshot)이 막히거나 얼어붙는 환경(Brave iOS 등)에서도
+         작업 화면에 머무는 동안 관리자의 삭제/수정이 곧바로 반영되도록,
+         서버에서 최신 데이터를 주기적으로(그리고 앱 복귀 시 즉시) 다시 읽는다.
+       ========================================================= */
+    async function refreshPeersNow(force) {
+        if (!currentPhoto) return;
+        if (submitEntry._busy) return;                       // 등록 처리 중에는 건드리지 않는다
+        if (document.hidden) return;                         // 화면이 가려져 있으면 생략
+        // 강제(새로고침 버튼/앱 복귀)거나, 실시간 동기화가 한동안 끊긴 경우에만 서버를 다시 읽는다.
+        if (!force && (Date.now() - _lastDataSync) < 9000) return;
+        try {
+            await restLoadData();   // entryList 갱신 + loadPeerReviews(currentPhoto) 재호출
+        } catch (e) {
+            console.warn("다른 분석자 결과 새로고침 실패:", e);
+        }
+    }
+
+    function startPeerPolling() {
+        stopPeerPolling();
+        // 6초마다 점검(실제 서버 재읽기는 동기화가 끊겼을 때만 수행)
+        _peerPollTimer = setInterval(() => { refreshPeersNow(false); }, 6000);
+    }
+    function stopPeerPolling() {
+        if (_peerPollTimer) { clearInterval(_peerPollTimer); _peerPollTimer = null; }
     }
 
     function showPeerModal(data, alias) {
@@ -1625,32 +1681,44 @@
     // 관리자가 방금 삭제/수정했는데 실시간 동기화가 늦거나 막힌(예: Brave iOS)
     // 환경에서도 최신 상태 위에 병합되도록 보장한다.
     // 반환: { exists: true, data } | { exists: false } | { exists: null }(확인 불가)
+    //
+    // ※ 중요: SDK getDoc 의 exists()=false 는 '삭제'일 수도 있지만 '오프라인 캐시 미스'
+    //    일 수도 있다(분석자 기록은 REST로 저장돼 SDK 캐시에 없을 수 있음).
+    //    따라서 '서버 직통'인 REST 단일 문서 GET 을 우선 신뢰하고,
+    //    SDK 로 떨어질 땐 캐시에서 온 결과(fromCache)는 '삭제'로 단정하지 않는다.
     async function fetchEntryLive(dbId) {
         if (!dbId) return { exists: false };
 
-        // 1) SDK 우선
-        if (window.__authReady && window.fs && window.fs.db && window.fs.getDoc && window.fs.doc) {
+        // 1) REST 단일 문서 GET (서버 직통 — 로컬 캐시 영향 없음). 가장 신뢰도 높은 신호.
+        try {
+            const cfg = window.FB || {};
+            if (cfg.projectId && cfg.apiKey) {
+                const url = `https://firestore.googleapis.com/v1/projects/${cfg.projectId}/databases/(default)/documents/inspections/${dbId}?key=${encodeURIComponent(cfg.apiKey)}`;
+                // 보안 규칙이 인증 읽기만 허용하는 경우를 대비해, 이미 받아둔 토큰이 있으면 함께 보낸다.
+                const headers = {};
+                try {
+                    if (_restToken && Date.now() < _restTokenExp - 60000) headers["Authorization"] = "Bearer " + _restToken;
+                } catch (_) { }
+                const res = await withTimeout(fetch(url, { method: "GET", cache: "no-store", headers }), 8000, "최신 확인");
+                if (res.status === 404) return { exists: false };               // 확실히 삭제됨
+                if (res.ok) { const j = await res.json(); return { exists: true, data: restDocToObj(j) }; }
+                // 403/5xx 등 → 단정하지 말고 아래 SDK 로 재시도
+            }
+        } catch (e) { console.warn("최신 확인 REST 실패 → SDK 재시도:", e); }
+
+        // 2) SDK getDoc 폴백 — 단, 캐시에서 온 'exists=false'는 '삭제'로 단정하지 않는다.
+        if (window.fs && window.fs.db && window.fs.getDoc && window.fs.doc) {
             try {
                 const { db, doc, getDoc } = window.fs;
                 const snap = await withTimeout(getDoc(doc(db, "inspections", dbId)), 8000, "최신 확인");
-                return snap.exists() ? { exists: true, data: snap.data() } : { exists: false };
-            } catch (e) { console.warn("최신 상태 확인 SDK 실패 → REST 재시도:", e); }
+                if (snap.exists()) return { exists: true, data: snap.data() };
+                // 문서가 없다고 나오면: 서버에서 확정된 경우에만 '삭제'로 판단한다.
+                if (snap.metadata && snap.metadata.fromCache) return { exists: null }; // 캐시 미스 → 불명
+                return { exists: false };
+            } catch (e) { console.warn("최신 확인 SDK 실패:", e); }
         }
 
-        // 2) REST 폴백 (단일 문서 GET)
-        try {
-            const cfg = window.FB || {};
-            if (!cfg.projectId || !cfg.apiKey) throw new Error("프로젝트 설정 없음");
-            const url = `https://firestore.googleapis.com/v1/projects/${cfg.projectId}/databases/(default)/documents/inspections/${dbId}?key=${encodeURIComponent(cfg.apiKey)}`;
-            const res = await withTimeout(fetch(url, { method: "GET", cache: "no-store" }), 8000, "최신 확인");
-            if (res.status === 404) return { exists: false };   // 관리자가 삭제함
-            if (!res.ok) throw new Error("HTTP " + res.status);
-            const j = await res.json();
-            return { exists: true, data: restDocToObj(j) };
-        } catch (e) {
-            console.warn("최신 상태 확인 실패(확인 불가):", e);
-            return { exists: null };   // 네트워크 등으로 확인 불가 → 호출부에서 보수적 처리
-        }
+        return { exists: null };   // 확인 불가 → 호출부에서 보수적(로컬 병합) 처리
     }
 
     async function submitEntry() {
@@ -1791,9 +1859,11 @@
                     id: p.id || Date.now() + Math.random(),
                     x: p.x ?? 50, y: p.y ?? 50, text: p.text, listOnly: !!p.listOnly
                 }));
+                _peerSig = "";
                 document.getElementById("galleryView").style.display = "none";
                 document.getElementById("workView").style.display = "block";
                 renderStage(); renderIssueList(); loadPeerReviews(currentPhoto); updateSubmitBar();
+                startPeerPolling(); refreshPeersNow(true);
                 showToast("📂 점검 파일을 불러왔습니다");
             } catch (err) {
                 console.error(err);
