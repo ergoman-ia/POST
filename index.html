@@ -492,17 +492,12 @@
                     <button class="btn btn-ghost btn-sm pc-only" onclick="App.backupMine()" title="현재 입력을 파일로 저장 (나중에 불러와 수정 가능)">💾 내 점검 백업</button>
                 </div>
 
-                <!-- 이미지 + 다른 분석자 결과 -->
+                <!-- 이미지 -->
                 <div class="panel" style="padding:14px;">
                     <div class="stage-wrap">
                         <div class="stage" id="stage">
                             <div class="stage-hint" id="stageHint">📍 위험한 곳을 눌러 표시하세요</div>
                         </div>
-                    </div>
-
-                    <div id="peerBox" class="peer-box" style="display:none;">
-                        <div class="head" id="peerHead">💡 다른 분석자들의 결과</div>
-                        <div id="peerBadges" class="peer-badges"></div>
                     </div>
                 </div>
 
@@ -535,6 +530,12 @@
                             <input type="text" id="userOrg" placeholder="예: (주)XYZ">
                         </div>
                     </div>
+                </div>
+
+                <!-- 다른 분석자 결과 (맨 아래에 배치 → 입력 중에도 사진이 가려지지 않음) -->
+                <div id="peerBox" class="peer-box" style="display:none; margin-top:16px;">
+                    <div class="head" id="peerHead">💡 다른 분석자들의 결과</div>
+                    <div id="peerBadges" class="peer-badges"></div>
                 </div>
             </div>
         </section>
@@ -674,7 +675,6 @@
     let filteredPhoto = null;    // 관리자 사진 필터
     let savedReport = null;      // 재그룹 결과
     let analyzedNames = "";
-    let peerInputFocused = false;   // 모바일에서 글 입력(quickInput) 포커스 중이면 true
 
     const LS = {
         name: "inspector_name",
@@ -823,22 +823,6 @@
 
         // 사진 스테이지 클릭 → 핀
         document.getElementById("stage").addEventListener("click", onStageClick);
-
-        // 모바일: 글 입력 박스에 포커스하면 다른 분석자 결과 컨테이너를 숨겨
-        // 사진이 위로 밀려 보이지 않는 문제를 막는다. (블러 시 다시 표시)
-        const quickInputEl = document.getElementById("quickInput");
-        if (quickInputEl) {
-            quickInputEl.addEventListener("focus", () => {
-                if (!isMobile) return;
-                peerInputFocused = true;
-                const box = document.getElementById("peerBox");
-                if (box) box.style.display = "none";
-            });
-            quickInputEl.addEventListener("blur", () => {
-                peerInputFocused = false;
-                if (currentPhoto) loadPeerReviews(currentPhoto);
-            });
-        }
 
         // 이름/소속 입력 시: "고정" 모드일 때만 기억한다.
         ["userName", "userOrg"].forEach((id) => {
@@ -1601,11 +1585,6 @@
 
         if (peers.length === 0) { box.style.display = "none"; return; }
 
-        // 모바일에서 글로 등록하려고 입력 박스에 포커스한 동안에는,
-        // 다른 분석자 결과 컨테이너가 이미지를 아래로 밀어내 사진이 보이지
-        // 않게 되는 문제를 막기 위해 컨테이너를 숨긴다(블러 시 다시 표시).
-        if (isMobile && peerInputFocused) { box.style.display = "none"; return; }
-
         box.style.display = "block";
         head.innerHTML = `💡 다른 분석자들의 결과 <b style="color:var(--primary)">${peers.length}건</b> · 눌러서 참고`;
         badges.innerHTML = "";
@@ -1629,6 +1608,51 @@
     /* =========================================================
        등록 (Firebase 저장 — 구조 유지)
        ========================================================= */
+
+    // 핀/문제점 배열을 표준 형태로 정규화한다(pins 우선, 없으면 issues 텍스트로 복원).
+    function normalizePins(obj) {
+        if (obj && Array.isArray(obj.pins) && obj.pins.length) {
+            return obj.pins.map((p) => ({
+                id: p.id, x: p.x, y: p.y, text: p.text, listOnly: !!p.listOnly
+            }));
+        }
+        return ((obj && obj.issues) || []).map((t, i) => ({
+            id: Date.now() + i, x: 50, y: 50, text: t, listOnly: true
+        }));
+    }
+
+    // 등록 직전, 대상 문서의 '현재 DB 상태'를 한 번 더 직접 읽는다.
+    // 관리자가 방금 삭제/수정했는데 실시간 동기화가 늦거나 막힌(예: Brave iOS)
+    // 환경에서도 최신 상태 위에 병합되도록 보장한다.
+    // 반환: { exists: true, data } | { exists: false } | { exists: null }(확인 불가)
+    async function fetchEntryLive(dbId) {
+        if (!dbId) return { exists: false };
+
+        // 1) SDK 우선
+        if (window.__authReady && window.fs && window.fs.db && window.fs.getDoc && window.fs.doc) {
+            try {
+                const { db, doc, getDoc } = window.fs;
+                const snap = await withTimeout(getDoc(doc(db, "inspections", dbId)), 8000, "최신 확인");
+                return snap.exists() ? { exists: true, data: snap.data() } : { exists: false };
+            } catch (e) { console.warn("최신 상태 확인 SDK 실패 → REST 재시도:", e); }
+        }
+
+        // 2) REST 폴백 (단일 문서 GET)
+        try {
+            const cfg = window.FB || {};
+            if (!cfg.projectId || !cfg.apiKey) throw new Error("프로젝트 설정 없음");
+            const url = `https://firestore.googleapis.com/v1/projects/${cfg.projectId}/databases/(default)/documents/inspections/${dbId}?key=${encodeURIComponent(cfg.apiKey)}`;
+            const res = await withTimeout(fetch(url, { method: "GET", cache: "no-store" }), 8000, "최신 확인");
+            if (res.status === 404) return { exists: false };   // 관리자가 삭제함
+            if (!res.ok) throw new Error("HTTP " + res.status);
+            const j = await res.json();
+            return { exists: true, data: restDocToObj(j) };
+        } catch (e) {
+            console.warn("최신 상태 확인 실패(확인 불가):", e);
+            return { exists: null };   // 네트워크 등으로 확인 불가 → 호출부에서 보수적 처리
+        }
+    }
+
     async function submitEntry() {
         // 투터치(빠른 연속 탭) 방지 — 한 번의 등록이 끝나기 전에는 재실행하지 않는다.
         if (submitEntry._busy) return;
@@ -1660,26 +1684,44 @@
             // '덮어쓰기'가 아니라 '기존 자료에 이번 입력을 추가(병합)'한다.
             const dup = entryList.find((it) => it.name === name && it.org === org && it.photo === currentPhoto);
 
-            let finalPins;
+            // 등록 직전, 대상 문서의 '현재 DB 상태'를 한 번 더 확인한다.
+            //  - 관리자가 이미 삭제했으면  → 되살리지 않고 '새 항목'으로 등록
+            //  - 관리자가 수정했으면        → DB의 '최신' 핀 위에 이번 입력을 추가
+            //  - 확인 불가(오프라인 등)이면  → 보수적으로 로컬 기준 병합(기존 동작)
+            let targetDbId = null;
+            let basePins = [];
+
             if (dup) {
-                const prevPins = (Array.isArray(dup.pins) && dup.pins.length)
-                    ? dup.pins.map((p) => ({ id: p.id, x: p.x, y: p.y, text: p.text, listOnly: !!p.listOnly }))
-                    : (dup.issues || []).map((t, i) => ({ id: Date.now() + i, x: 50, y: 50, text: t, listOnly: true }));
-                finalPins = prevPins.concat(myPins);
-            } else {
-                finalPins = myPins;
+                showToast("⏳ 최신 상태 확인 중…");
+                const live = await fetchEntryLive(dup.dbId);
+
+                if (live.exists === false) {
+                    // 관리자가 정리(삭제)한 기록 → 새 항목으로 등록(되살리지 않음)
+                    targetDbId = null;
+                    basePins = [];
+                    const di = entryList.findIndex((it) => it.dbId === dup.dbId);
+                    if (di >= 0) entryList.splice(di, 1);   // 낡은 로컬 항목 제거
+                } else if (live.exists === true) {
+                    // 최신 DB 상태 위에 병합
+                    targetDbId = dup.dbId;
+                    basePins = normalizePins(live.data);
+                } else {
+                    // 확인 불가 → 로컬 기준 병합
+                    targetDbId = dup.dbId;
+                    basePins = normalizePins(dup);
+                }
             }
 
+            const finalPins = basePins.concat(myPins);
+
             const entry = {
-                id: dup ? dup.id : Date.now(),
+                id: targetDbId ? dup.id : Date.now(),
                 timestamp: Date.now(),
                 name, org,
                 issues: finalPins.map((p) => p.text),
                 pins: finalPins,
                 photo: currentPhoto
             };
-
-            const targetDbId = dup ? dup.dbId : null;
 
             showToast("⏳ 저장 중…");
             const newId = await persistEntry(entry, targetDbId);
@@ -1689,11 +1731,12 @@
             if (targetDbId) {
                 const i = entryList.findIndex((it) => it.dbId === targetDbId);
                 if (i >= 0) entryList[i] = { dbId: targetDbId, ...entry };
+                else entryList.unshift({ dbId: targetDbId, ...entry });
             } else {
                 entryList.unshift({ dbId: newId, ...entry });
             }
 
-            showToast(dup ? "➕ 기존 결과에 추가했습니다" : "✅ 등록을 완료했습니다");
+            showToast(targetDbId ? "➕ 기존 결과에 추가했습니다" : "✅ 등록을 완료했습니다");
 
             // 입력 초기화
             issues = [];
