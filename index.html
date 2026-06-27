@@ -4,7 +4,7 @@
 <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-    <title>현장 위험요인 점검 · AI 분석</title>
+    <title>현장 사진에서 위험요인 찾기</title>
 
     <link rel="preconnect" href="https://cdn.jsdelivr.net">
     <link
@@ -442,7 +442,7 @@
     <!-- ===== 상단 바 ===== -->
     <header class="topbar">
         <div class="topbar-inner">
-            <div class="brand"><span class="dot"></span> 현장 사진에서 위험요인 점검</div>
+            <div class="brand"><span class="dot"></span> 현장 사진에서 위험요인 찾기</div>
             <div class="seg" id="modeSeg">
                 <button class="user active" data-mode="user">👤 분석자</button>
                 <button class="admin" data-mode="admin">🔐 관리자</button>
@@ -1687,7 +1687,8 @@
     //    따라서 '서버 직통'인 REST 단일 문서 GET 을 우선 신뢰하고,
     //    SDK 로 떨어질 땐 캐시에서 온 결과(fromCache)는 '삭제'로 단정하지 않는다.
     async function fetchEntryLive(dbId) {
-        if (!dbId) return { exists: false };
+        // dbId 가 없으면 '삭제'로 단정하지 않는다(확인 불가 → 로컬 기준 병합).
+        if (!dbId) return { exists: null };
 
         // 1) REST 단일 문서 GET (서버 직통 — 로컬 캐시 영향 없음). 가장 신뢰도 높은 신호.
         try {
@@ -1700,21 +1701,21 @@
                     if (_restToken && Date.now() < _restTokenExp - 60000) headers["Authorization"] = "Bearer " + _restToken;
                 } catch (_) { }
                 const res = await withTimeout(fetch(url, { method: "GET", cache: "no-store", headers }), 8000, "최신 확인");
-                if (res.status === 404) return { exists: false };               // 확실히 삭제됨
                 if (res.ok) { const j = await res.json(); return { exists: true, data: restDocToObj(j) }; }
-                // 403/5xx 등 → 단정하지 말고 아래 SDK 로 재시도
+                if (res.status === 404) return { exists: false };   // 서버가 명확히 '없음' → 삭제로 확정
+                // 401/403/5xx 등 → 단정하지 말고 아래 SDK 로 재시도
             }
         } catch (e) { console.warn("최신 확인 REST 실패 → SDK 재시도:", e); }
 
-        // 2) SDK getDoc 폴백 — 단, 캐시에서 온 'exists=false'는 '삭제'로 단정하지 않는다.
+        // 2) SDK getDoc 폴백.
+        //    SDK 의 exists()=false 는 캐시 미스/롱폴링 특성상 오탐 가능성이 있어
+        //    '삭제'로 단정하지 않는다. (삭제 확정은 위의 REST 404 에서만 내린다.)
         if (window.fs && window.fs.db && window.fs.getDoc && window.fs.doc) {
             try {
                 const { db, doc, getDoc } = window.fs;
                 const snap = await withTimeout(getDoc(doc(db, "inspections", dbId)), 8000, "최신 확인");
                 if (snap.exists()) return { exists: true, data: snap.data() };
-                // 문서가 없다고 나오면: 서버에서 확정된 경우에만 '삭제'로 판단한다.
-                if (snap.metadata && snap.metadata.fromCache) return { exists: null }; // 캐시 미스 → 불명
-                return { exists: false };
+                return { exists: null };   // 없어 보여도 SDK 단독으로는 삭제로 단정하지 않음
             } catch (e) { console.warn("최신 확인 SDK 실패:", e); }
         }
 
@@ -1752,38 +1753,41 @@
             // '덮어쓰기'가 아니라 '기존 자료에 이번 입력을 추가(병합)'한다.
             const dup = entryList.find((it) => it.name === name && it.org === org && it.photo === currentPhoto);
 
-            // 등록 직전, 대상 문서의 '현재 DB 상태'를 한 번 더 확인한다.
-            //  - 관리자가 이미 삭제했으면  → 되살리지 않고 '새 항목'으로 등록
-            //  - 관리자가 수정했으면        → DB의 '최신' 핀 위에 이번 입력을 추가
-            //  - 확인 불가(오프라인 등)이면  → 보수적으로 로컬 기준 병합(기존 동작)
+            // 기본 동작(가장 중요): 로컬에 보이는 기존 자료가 있으면 그 위에 '항상 이어서 추가'한다.
+            //   - 그 다음, 최신 DB 상태를 확인할 수 있으면 보정한다:
+            //       · 관리자가 수정했으면 → 최신 핀 위에 추가
+            //       · 서버가 404로 '확실히 삭제'를 알려준 경우에만 → 되살리지 않고 새 항목으로 등록
+            //       · 확인 불가/불확실 → 위의 '로컬 기존 자료에 이어서 추가'를 그대로 유지
             let targetDbId = null;
             let basePins = [];
 
             if (dup) {
-                showToast("⏳ 최신 상태 확인 중…");
-                const live = await fetchEntryLive(dup.dbId);
+                // 1) 우선 로컬 기준으로 '이어서 추가'를 확정해 둔다(추가가 절대 누락되지 않도록).
+                targetDbId = dup.dbId || null;
+                basePins = normalizePins(dup);
 
-                if (live.exists === false) {
-                    // 관리자가 정리(삭제)한 기록 → 새 항목으로 등록(되살리지 않음)
-                    targetDbId = null;
-                    basePins = [];
-                    const di = entryList.findIndex((it) => it.dbId === dup.dbId);
-                    if (di >= 0) entryList.splice(di, 1);   // 낡은 로컬 항목 제거
-                } else if (live.exists === true) {
-                    // 최신 DB 상태 위에 병합
-                    targetDbId = dup.dbId;
-                    basePins = normalizePins(live.data);
-                } else {
-                    // 확인 불가 → 로컬 기준 병합
-                    targetDbId = dup.dbId;
-                    basePins = normalizePins(dup);
-                }
+                // 2) 최신 상태 확인으로 보정 시도(실패해도 위 기본값으로 추가됨).
+                try {
+                    showToast("⏳ 최신 상태 확인 중…");
+                    const live = await fetchEntryLive(dup.dbId);
+                    if (live.exists === true) {
+                        targetDbId = dup.dbId || null;
+                        basePins = normalizePins(live.data);          // 관리자 수정 반영
+                    } else if (live.exists === false) {
+                        // 서버가 '없음(404)'으로 확정 → 되살리지 않고 새 항목으로 등록
+                        targetDbId = null;
+                        basePins = [];
+                        const di = entryList.findIndex((it) => it.dbId === dup.dbId);
+                        if (di >= 0) entryList.splice(di, 1);
+                    }
+                    // live.exists === null → 보정 없이 기본값(로컬 이어서 추가) 유지
+                } catch (_) { /* 확인 실패 → 기본값 유지(로컬 이어서 추가) */ }
             }
 
             const finalPins = basePins.concat(myPins);
 
             const entry = {
-                id: targetDbId ? dup.id : Date.now(),
+                id: targetDbId && dup ? dup.id : Date.now(),
                 timestamp: Date.now(),
                 name, org,
                 issues: finalPins.map((p) => p.text),
@@ -1804,7 +1808,8 @@
                 entryList.unshift({ dbId: newId, ...entry });
             }
 
-            showToast(targetDbId ? "➕ 기존 결과에 추가했습니다" : "✅ 등록을 완료했습니다");
+            // 사용자에게는 '기존에 이어서 추가'인지 '새로 등록'인지를 알려준다.
+            showToast((dup && (basePins.length > 0 || targetDbId)) ? "➕ 기존 결과에 추가했습니다" : "✅ 등록을 완료했습니다");
 
             // 입력 초기화
             issues = [];
