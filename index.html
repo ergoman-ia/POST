@@ -4,7 +4,7 @@
 <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-    <title>현장 위험요인 점검 · AI 분석</title>
+    <title>현장 사진에서 위험요인 찾기</title>
 
     <link rel="preconnect" href="https://cdn.jsdelivr.net">
     <link
@@ -275,6 +275,7 @@
         @media (max-width: 768px) {
             #modeSeg { display: none; }          /* 휴대폰: 분석자 모드로 고정 */
             .pc-only { display: none !important; } /* 휴대폰: 백업 등 PC 전용 기능 숨김 */
+            .mobile-hide { display: none !important; } /* 휴대폰: 핀 안내 문구 등 숨김 */
             #stageHint { display: none !important; }
             .peer-badges { display: grid; grid-template-columns: repeat(3, 1fr); gap: 5px; }
             .peer-badge { padding: 6px 4px; font-size: .68rem; text-align: center;
@@ -444,7 +445,7 @@
     <!-- ===== 상단 바 ===== -->
     <header class="topbar">
         <div class="topbar-inner">
-            <div class="brand"><span class="dot"></span> 현장 사진에서 위험요인 점검</div>
+            <div class="brand"><span class="dot"></span> 현장 사진에서 위험요인 찾기</div>
             <div class="seg" id="modeSeg">
                 <button class="user active" data-mode="user">👤 분석자</button>
                 <button class="admin" data-mode="admin">🔐 관리자</button>
@@ -473,7 +474,7 @@
                     <div style="display:flex; align-items:center; justify-content:space-between; gap:10px; flex-wrap:wrap;">
                         <div>
                             <h2 class="section-title">📷 점검할 현장 사진 선택</h2>
-                            <p class="section-sub">사진을 누르면 위험요인을 표시할 수 있어요.</p>
+                            <p class="section-sub mobile-hide">사진을 누르면 위험요인을 표시할 수 있어요.</p>
                         </div>
                         <div>
                             <input type="file" id="userJsonLoad" hidden accept=".json">
@@ -494,23 +495,18 @@
                     <button class="btn btn-ghost btn-sm pc-only" onclick="App.backupMine()" title="현재 입력을 파일로 저장 (나중에 불러와 수정 가능)">💾 내 점검 백업</button>
                 </div>
 
-                <!-- 이미지 + 다른 분석자 결과 -->
+                <!-- 이미지 -->
                 <div class="panel" style="padding:14px;">
                     <div class="stage-wrap">
                         <div class="stage" id="stage">
                             <div class="stage-hint" id="stageHint">📍 위험한 곳을 눌러 표시하세요</div>
                         </div>
                     </div>
-
-                    <div id="peerBox" class="peer-box" style="display:none;">
-                        <div class="head" id="peerHead">💡 다른 분석자들의 결과</div>
-                        <div id="peerBadges" class="peer-badges"></div>
-                    </div>
                 </div>
 
                 <!-- 내 위험요인 입력 + 이름/소속 -->
                 <div class="panel">
-                    <h2 class="section-title" style="font-size:1rem;">📝 내가 찾은 위험요인</h2>
+                    <h2 class="section-title" style="font-size:1rem;">📝 내가 찾은 위험요인 <span style="color:red;">(하나씩 여러개 추가)</span></h2>
                     <div class="quick-add" style="margin-top:10px;">
                         <input type="text" id="quickInput" placeholder="사진 없이 글로 추가 (예: 안전모 미착용)"
                             onkeydown="if(event.key==='Enter') App.quickAdd()">
@@ -537,6 +533,12 @@
                             <input type="text" id="userOrg" placeholder="예: (주)XYZ">
                         </div>
                     </div>
+                </div>
+
+                <!-- 다른 분석자 결과 (맨 아래에 배치 → 입력 중에도 사진이 가려지지 않음) -->
+                <div id="peerBox" class="peer-box" style="display:none; margin-top:16px;">
+                    <div class="head" id="peerHead">💡 다른 분석자들의 결과</div>
+                    <div id="peerBadges" class="peer-badges"></div>
                 </div>
             </div>
         </section>
@@ -676,6 +678,9 @@
     let filteredPhoto = null;    // 관리자 사진 필터
     let savedReport = null;      // 재그룹 결과
     let analyzedNames = "";
+    let _lastDataSync = 0;       // 마지막으로 inspections 데이터가 도착한 시각(실시간/REST 공통)
+    let _peerPollTimer = null;   // 작업 화면에서 다른 분석자 결과를 주기적으로 새로고침하는 타이머
+    let _peerSig = "";           // 현재 표시 중인 다른 분석자 결과의 시그니처(불필요한 재렌더 방지)
 
     const LS = {
         name: "inspector_name",
@@ -856,6 +861,12 @@
             document.body.classList.remove("printing-postit", "printing-report");
             document.getElementById("printLayer").innerHTML = "";
         });
+
+        // 앱/탭으로 다시 돌아왔을 때: 작업 화면이면 다른 분석자 결과를 즉시 최신화한다.
+        // (백그라운드 동안 관리자가 삭제/수정한 내용이 바로 반영되도록)
+        document.addEventListener("visibilitychange", () => {
+            if (!document.hidden && currentPhoto) refreshPeersNow(true);
+        });
     }
 
     /* =========================================================
@@ -999,6 +1010,9 @@
         const o = { id: (d.name || "").split("/").pop() };
         const f = d.fields || {};
         for (const k in f) o[k] = restVal(f[k]);
+        // 문서 ID를 별도 키에 보관한다. (inspections 처럼 내부 'id' 필드가 있으면
+        //  위 루프에서 o.id 가 내부 id 로 덮어써지므로, 진짜 문서 ID 를 잃지 않도록 한다.)
+        o._dbId = (d.name || "").split("/").pop();
         return o;
     }
     async function restFetchCollection(name, pageSize) {
@@ -1033,9 +1047,14 @@
     // 점검 기록(inspections)도 인증/스트리밍을 우회해 REST로 읽는다.
     async function restLoadData() {
         const docs = await restFetchCollection("inspections", 300);
-        entryList = docs.map((d) => { const { id, ...rest } = d; return { dbId: id, ...rest }; });
+        entryList = docs.map((d) => {
+            const dbId = d._dbId || d.id;              // 진짜 문서 ID (내부 id 필드에 덮이지 않은 값)
+            const { _dbId, ...rest } = d;              // 내부 'id' 필드는 그대로 유지(인쇄/삭제용)
+            return { dbId, ...rest };
+        });
         entryList.sort((a, b) => (b.timestamp || 0) - (a.timestamp || 0));   // 최신 입력순(SDK orderBy와 동일)
         _dataReady = true;
+        _lastDataSync = Date.now();
         renderTable();
         renderUserGallery();
         if (currentPhoto) loadPeerReviews(currentPhoto);
@@ -1145,6 +1164,30 @@
         if (!res.ok) { const t = await res.text().catch(() => ""); throw new Error("REST 저장 HTTP " + res.status + " " + t.slice(0, 120)); }
         return res.json();
     }
+    async function restDeleteDoc(coll, docId) {
+        const cfg = window.FB || {};
+        const token = await restAuthToken();
+        const url = `https://firestore.googleapis.com/v1/projects/${cfg.projectId}/databases/(default)/documents/${coll}/${docId}?key=${encodeURIComponent(cfg.apiKey)}`;
+        const res = await withTimeout(fetch(url, {
+            method: "DELETE",
+            headers: { "Authorization": "Bearer " + token }
+        }), 12000, "REST 삭제");
+        if (!res.ok && res.status !== 404) { const t = await res.text().catch(() => ""); throw new Error("REST 삭제 HTTP " + res.status + " " + t.slice(0, 120)); }
+        return true;
+    }
+    // 점검 기록 문서 1건 삭제(SDK 우선, 막히면 REST). 중복 통합 시 사용.
+    async function deleteEntryDoc(dbId) {
+        if (!dbId) return;
+        if (window.__authReady && window.fs && window.fs.db && window.fs.deleteDoc && window.fs.doc) {
+            try {
+                const { db, doc, deleteDoc } = window.fs;
+                await withTimeout(deleteDoc(doc(db, "inspections", dbId)), 8000, "삭제");
+                return;
+            } catch (e) { console.warn("중복 삭제 SDK 실패 → REST 재시도:", e); }
+        }
+        await restDeleteDoc("inspections", dbId);
+    }
+
     // 인증이 살아있으면 SDK, 막혀있으면(또는 SDK 실패 시) REST로 저장한다. 새 dbId 반환.
     async function persistEntry(entry, targetDbId) {
         if (window.__authReady && window.fs && window.fs.db) {
@@ -1318,9 +1361,13 @@
         const q = query(collection(db, "inspections"), orderBy("timestamp", "desc"));
 
         const apply = (snap) => {
+            // 로컬 캐시만 반영된(서버 미반영) 스냅샷은 건너뛴다 — 관리자의 최신 변경이
+            // 누락된 오래된 캐시로 화면을 되돌리지 않도록 한다.
+            try { if (snap.metadata && snap.metadata.fromCache && entryList.length) return; } catch (_) { }
             entryList = [];
             snap.forEach((d) => entryList.push({ dbId: d.id, ...d.data() }));
             _dataReady = true;
+            _lastDataSync = Date.now();
             renderTable();
             renderUserGallery();
             if (currentPhoto) loadPeerReviews(currentPhoto);
@@ -1404,6 +1451,7 @@
     function selectPhoto(src) {
         currentPhoto = src;
         issues = [];
+        _peerSig = "";   // 새 사진 → 시그니처 초기화(첫 렌더가 생략되지 않도록)
         document.getElementById("galleryView").style.display = "none";
         document.getElementById("workView").style.display = "block";
         renderStage();
@@ -1411,14 +1459,18 @@
         loadPeerReviews(src);
         updateSubmitBar();
         window.scrollTo({ top: 0, behavior: "smooth" });
+        startPeerPolling();        // 작업 화면에 머무는 동안 다른 분석자 결과를 최신으로 유지
+        refreshPeersNow(true);     // 진입 즉시 서버에서 한 번 최신화
     }
 
     function backToGallery() {
+        stopPeerPolling();
         document.getElementById("quickInput").value = "";
         document.getElementById("workView").style.display = "none";
         document.getElementById("galleryView").style.display = "block";
         currentPhoto = null;
         issues = [];
+        _peerSig = "";
         hideSubmitBar();
     }
 
@@ -1588,10 +1640,19 @@
         // → 어느 기기/브라우저에서 보든 모든 분석자의 결과가 동일하게 보인다.
         const peers = entryList.filter((it) => it.photo === imageSrc);
 
+        // 내용이 바뀌지 않았으면 다시 그리지 않는다(주기적 새로고침 시 깜빡임/탭 방해 방지).
+        const sig = peers.map((p) => (p.dbId || p.id) + ":" + (p.timestamp || 0) + ":" + ((p.issues || []).length)).join("|");
+        if (sig === _peerSig && box.style.display !== "none") return;
+        _peerSig = sig;
+
         if (peers.length === 0) { box.style.display = "none"; return; }
 
         box.style.display = "block";
-        head.innerHTML = `💡 다른 분석자들의 결과 <b style="color:var(--primary)">${peers.length}건</b> · 눌러서 참고`;
+        head.innerHTML = `💡 다른 분석자들의 결과 <b style="color:var(--primary)">${peers.length}건</b> · 눌러서 참고`
+            + ` <button type="button" id="peerRefreshBtn" title="최신으로 새로고침"
+                 style="margin-left:auto; border:none; background:transparent; cursor:pointer; font-size:.9rem;">🔄</button>`;
+        const rb = document.getElementById("peerRefreshBtn");
+        if (rb) rb.addEventListener("click", (e) => { e.stopPropagation(); refreshPeersNow(true); });
         badges.innerHTML = "";
         peers.forEach((data, i) => {
             const b = document.createElement("span");
@@ -1600,6 +1661,34 @@
             b.addEventListener("click", () => showPeerModal(data, `분석자 ${i + 1}`));
             badges.appendChild(b);
         });
+    }
+
+    /* =========================================================
+       다른 분석자 결과 '실시간' 반영
+       - 실시간 스트리밍(onSnapshot)이 막히거나 얼어붙는 환경(Brave iOS 등)에서도
+         작업 화면에 머무는 동안 관리자의 삭제/수정이 곧바로 반영되도록,
+         서버에서 최신 데이터를 주기적으로(그리고 앱 복귀 시 즉시) 다시 읽는다.
+       ========================================================= */
+    async function refreshPeersNow(force) {
+        if (!currentPhoto) return;
+        if (submitEntry._busy) return;                       // 등록 처리 중에는 건드리지 않는다
+        if (document.hidden) return;                         // 화면이 가려져 있으면 생략
+        // 강제(새로고침 버튼/앱 복귀)거나, 실시간 동기화가 한동안 끊긴 경우에만 서버를 다시 읽는다.
+        if (!force && (Date.now() - _lastDataSync) < 9000) return;
+        try {
+            await restLoadData();   // entryList 갱신 + loadPeerReviews(currentPhoto) 재호출
+        } catch (e) {
+            console.warn("다른 분석자 결과 새로고침 실패:", e);
+        }
+    }
+
+    function startPeerPolling() {
+        stopPeerPolling();
+        // 6초마다 점검(실제 서버 재읽기는 동기화가 끊겼을 때만 수행)
+        _peerPollTimer = setInterval(() => { refreshPeersNow(false); }, 6000);
+    }
+    function stopPeerPolling() {
+        if (_peerPollTimer) { clearInterval(_peerPollTimer); _peerPollTimer = null; }
     }
 
     function showPeerModal(data, alias) {
@@ -1613,61 +1702,182 @@
     /* =========================================================
        등록 (Firebase 저장 — 구조 유지)
        ========================================================= */
-    async function submitEntry() {
-        const nameEl = document.getElementById("userName");
-        const orgEl = document.getElementById("userOrg");
-        const name = nameEl.value.trim();
-        const org = orgEl.value.trim();
 
-        if (!name) { showToast("이름을 입력해 주세요"); nameEl.focus(); return; }
-        if (issues.length === 0) { showToast("위험요인을 1개 이상 표시해 주세요"); return; }
+    // 핀/문제점 배열을 표준 형태로 정규화한다(pins 우선, 없으면 issues 텍스트로 복원).
+    function normalizePins(obj) {
+        if (obj && Array.isArray(obj.pins) && obj.pins.length) {
+            return obj.pins.map((p) => ({
+                id: p.id, x: p.x, y: p.y, text: p.text, listOnly: !!p.listOnly
+            }));
+        }
+        return ((obj && obj.issues) || []).map((t, i) => ({
+            id: Date.now() + i, x: 50, y: 50, text: t, listOnly: true
+        }));
+    }
 
-        if (isRemember()) {
+    // 같은 '이름 + 소속 + 사진'으로 이미 등록된 기록을 서버에서 직접 찾는다.
+    // 로컬 목록(entryList)이 최신이 아니거나, 같은 사람이 따로따로 저장한 중복이 있어도
+    // 확실하게 찾아 '하나로 합치기' 위해, 등록 시점에 서버를 조회한다.
+    //   - name 단일 등호 쿼리(복합 인덱스 불필요)로 이 사람의 기록만 가볍게 가져온 뒤,
+    //     org + photo 까지 일치하는 것만 추린다.
+    // 반환: { ok: 서버조회성공여부, list: [ {dbId, ...data}, ... ] }
+    async function findServerDups(name, org, photo) {
+        // 1) SDK 쿼리 (인증 정상일 때)
+        if (window.__authReady && window.fs && window.fs.db && window.fs.getDocs && window.fs.query && window.fs.where && window.fs.collection) {
             try {
-                localStorage.setItem(LS.name, name);
-                localStorage.setItem(LS.org, org);
-            } catch (_) { }
+                const { db, collection, query, where, getDocs } = window.fs;
+                const snap = await withTimeout(getDocs(query(collection(db, "inspections"), where("name", "==", name))), 9000, "기록 조회");
+                const out = [];
+                snap.forEach((d) => { const v = d.data(); if (v.org === org && v.photo === photo) out.push({ dbId: d.id, ...v }); });
+                return { ok: true, list: out };
+            } catch (e) { console.warn("기록 조회 SDK 실패 → REST 시도:", e); }
         }
 
-        const dup = entryList.find((it) => it.name === name && it.org === org && it.photo === currentPhoto);
-
-        const entry = {
-            id: Date.now(),
-            timestamp: Date.now(),
-            name, org,
-            issues: issues.map((p) => p.text),
-            pins: issues.map((p) => ({ id: p.id, x: p.x, y: p.y, text: p.text, listOnly: !!p.listOnly })),
-            photo: currentPhoto
-        };
-
-        let targetDbId = null;
-        if (dup) {
-            if (!await customConfirm("이미 등록한 사진입니다.<br>기존 내용을 덮어쓸까요?")) return;
-            targetDbId = dup.dbId;
-            entry.id = dup.id;
-        }
-
-        showToast("⏳ 저장 중…");
+        // 2) REST 구조화 쿼리 (runQuery, name 단일 필터)
         try {
-            const newId = await persistEntry(entry, targetDbId);
+            const cfg = window.FB || {};
+            if (cfg.projectId && cfg.apiKey) {
+                const url = `https://firestore.googleapis.com/v1/projects/${cfg.projectId}/databases/(default)/documents:runQuery?key=${encodeURIComponent(cfg.apiKey)}`;
+                const headers = { "Content-Type": "application/json" };
+                try { if (_restToken && Date.now() < _restTokenExp - 60000) headers["Authorization"] = "Bearer " + _restToken; } catch (_) { }
+                const body = {
+                    structuredQuery: {
+                        from: [{ collectionId: "inspections" }],
+                        where: { fieldFilter: { field: { fieldPath: "name" }, op: "EQUAL", value: { stringValue: name } } }
+                    }
+                };
+                const res = await withTimeout(fetch(url, { method: "POST", cache: "no-store", headers, body: JSON.stringify(body) }), 9000, "기록 조회");
+                if (res.ok) {
+                    const rows = await res.json();
+                    const out = [];
+                    (rows || []).forEach((row) => {
+                        if (!row || !row.document) return;
+                        const o = restDocToObj(row.document);          // { id(내부), _dbId(문서ID), ...fields }
+                        if (o.org === org && o.photo === photo) {
+                            const dbId = o._dbId;
+                            const { _dbId, ...rest } = o;
+                            out.push({ dbId, ...rest });
+                        }
+                    });
+                    return { ok: true, list: out };
+                }
+            }
+        } catch (e) { console.warn("기록 조회 REST 실패 → 로컬 사용:", e); }
 
-            // 실시간 동기화가 막힌 환경(Brave iOS)에서도 화면에 바로 반영되도록
-            // 로컬 목록을 즉시 갱신한다.
-            if (targetDbId) {
-                const i = entryList.findIndex((it) => it.dbId === targetDbId);
-                if (i >= 0) entryList[i] = { dbId: targetDbId, ...entry };
-            } else {
-                entryList.unshift({ dbId: newId, ...entry });
+        // 3) 폴백: 서버 조회 불가 → 로컬 목록에서 찾기(최선)
+        return { ok: false, list: entryList.filter((it) => it.name === name && it.org === org && it.photo === photo) };
+    }
+
+    async function submitEntry() {
+        // 투터치(빠른 연속 탭) 방지 — 한 번의 등록이 끝나기 전에는 재실행하지 않는다.
+        if (submitEntry._busy) return;
+        submitEntry._busy = true;
+        const submitBtn = document.querySelector("#submitBar .btn-success");
+        if (submitBtn) submitBtn.disabled = true;
+
+        try {
+            const nameEl = document.getElementById("userName");
+            const orgEl = document.getElementById("userOrg");
+            const name = nameEl.value.trim();
+            const org = orgEl.value.trim();
+
+            if (!name) { showToast("이름을 입력해 주세요"); nameEl.focus(); return; }
+            if (issues.length === 0) { showToast("위험요인을 1개 이상 표시해 주세요"); return; }
+
+            const remember = isRemember();
+            if (remember) {
+                try {
+                    localStorage.setItem(LS.name, name);
+                    localStorage.setItem(LS.org, org);
+                } catch (_) { }
             }
 
-            showToast(dup ? "♻️ 내용을 수정했습니다" : "✅ 등록을 완료했습니다");
+            // 이번에 입력한 핀/문제점
+            const myPins = issues.map((p) => ({ id: p.id, x: p.x, y: p.y, text: p.text, listOnly: !!p.listOnly }));
+
+            // === 같은 '이름 + 소속 + 사진'이면 기존 기록에 이번 입력을 합쳐 '한 건'으로 만든다 ===
+            // 로컬 목록에 의존하지 않고 '서버를 직접 조회'해, 같은 사람이 같은 사진에 등록한
+            // 기록을 모두 찾는다. (따로따로 저장된 중복이 있으면 모두 하나로 통합한다.)
+            showToast("⏳ 기존 기록 확인 중…");
+            const found = await findServerDups(name, org, currentPhoto);
+            let matches = (found.list || []).slice();
+            // 오래된 것부터: 가장 먼저 등록된 문서를 '유지 대상'으로 삼는다.
+            matches.sort((a, b) => (a.timestamp || 0) - (b.timestamp || 0));
+
+            let targetDbId = null;     // 합칠 대상 문서(없으면 새로 생성)
+            let keeperId = null;       // 유지 문서의 내부 id 필드
+            let basePins = [];         // 기존(서버) 핀들을 모두 합친 것
+            let extraDbIds = [];       // 통합 후 삭제할 중복 문서들
+
+            if (matches.length > 0) {
+                const keeper = matches[0];
+                targetDbId = keeper.dbId || null;
+                keeperId = keeper.id || null;
+                // 일치하는 모든 문서의 핀을 합친다(중복 통합).
+                matches.forEach((m) => { basePins = basePins.concat(normalizePins(m)); });
+                // 첫 문서를 제외한 나머지(중복)는 통합 후 삭제 대상.
+                extraDbIds = matches.slice(1).map((m) => m.dbId).filter(Boolean);
+            }
+
+            const combinedPins = basePins.concat(myPins);
+
+            // 동일한 문제점 텍스트는 한 번만 남긴다(버그 시기에 따로 저장돼 합쳐질 때 중복 정리).
+            const seenText = new Set();
+            const finalPins = combinedPins.filter((p) => {
+                const key = (p.text || "").trim();
+                if (!key) return true;
+                if (seenText.has(key)) return false;
+                seenText.add(key);
+                return true;
+            });
+
+            const entry = {
+                id: keeperId || Date.now(),
+                timestamp: Date.now(),
+                name, org,
+                issues: finalPins.map((p) => p.text),
+                pins: finalPins,
+                photo: currentPhoto
+            };
+
+            showToast("⏳ 저장 중…");
+            const newId = await persistEntry(entry, targetDbId);
+            const savedDbId = targetDbId || newId;
+
+            // 통합으로 남게 된 중복 문서들을 삭제한다(같은 사람이 같은 사진에 '한 건'만 남도록).
+            for (const exId of extraDbIds) {
+                try { await deleteEntryDoc(exId); } catch (e) { console.warn("중복 통합 삭제 실패:", exId, e); }
+            }
+
+            // 실시간 동기화가 막힌 환경(Brave iOS)에서도 화면에 바로 반영되도록 로컬 목록을 즉시 갱신한다.
+            // 1) 이번에 합쳐진/삭제된 모든 dbId 를 로컬에서 제거
+            const removeIds = new Set([savedDbId, ...extraDbIds]);
+            entryList = entryList.filter((it) => !removeIds.has(it.dbId));
+            // 2) 통합된 최신 한 건을 다시 추가
+            entryList.unshift({ dbId: savedDbId, ...entry });
+
+            // 사용자에게 '기존에 합쳐 추가'인지 '새로 등록'인지 알려준다.
+            showToast(matches.length > 0 ? "➕ 기존 결과에 합쳐서 추가했습니다" : "✅ 등록을 완료했습니다");
+
+            // 입력 초기화
             issues = [];
             document.getElementById("quickInput").value = "";
+
+            // '매번 리셋'이면 등록 후 이름·소속까지 완전히 비운다(저장값도 제거).
+            if (!remember) {
+                nameEl.value = "";
+                orgEl.value = "";
+                try { localStorage.removeItem(LS.name); localStorage.removeItem(LS.org); } catch (_) { }
+            }
+
             renderUserGallery();
             backToGallery();
         } catch (e) {
             console.error(e);
             showToast("❌ 저장 실패: " + (e.message || e));
+        } finally {
+            submitEntry._busy = false;
+            if (submitBtn) submitBtn.disabled = false;
         }
     }
 
@@ -1702,9 +1912,11 @@
                     id: p.id || Date.now() + Math.random(),
                     x: p.x ?? 50, y: p.y ?? 50, text: p.text, listOnly: !!p.listOnly
                 }));
+                _peerSig = "";
                 document.getElementById("galleryView").style.display = "none";
                 document.getElementById("workView").style.display = "block";
                 renderStage(); renderIssueList(); loadPeerReviews(currentPhoto); updateSubmitBar();
+                startPeerPolling(); refreshPeersNow(true);
                 showToast("📂 점검 파일을 불러왔습니다");
             } catch (err) {
                 console.error(err);
