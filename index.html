@@ -1439,9 +1439,7 @@
         //    → "기존 순서로 먼저 보였다가 잠시 뒤 재정렬되며 출렁이는" 문제 방지.
         //    단, 기록 로드가 계속 실패할 수 있으므로 4초가 지나면 그냥 그린다(안전망).
         if (_galleryReady && !_dataReady && !_gallerySortForce) {
-            if (!wrap.querySelector(".gallery-card")) {
-                wrap.innerHTML = `<div class="empty-state">사진을 정렬하는 중…</div>`;
-            }
+            // 화면은 초기의 '사진을 불러오는 중…' 문구를 그대로 유지한다.
             if (!_gallerySortWaitTimer) {
                 _gallerySortWaitTimer = setTimeout(() => {
                     _gallerySortWaitTimer = null;
