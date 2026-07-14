@@ -964,6 +964,10 @@
        ========================================================= */
     let _galleryReady = false;
     let _dataReady = false;
+    // 분석자 갤러리 첫 표시 보류용: 사진은 왔지만 점검 기록(분석자 수)이 아직이면
+    // 잠시 기다렸다가 '정렬 완료된 상태'로 한 번에 그린다. (재정렬 출렁임 방지)
+    let _gallerySortForce = false;      // 안전망 시간 초과 → 기록 없이도 그리기 허용
+    let _gallerySortWaitTimer = null;   // 안전망 타이머
     let _galleryUnsub = null;
     let _dataUnsub = null;
     let _lastLoadError = "";
@@ -1401,6 +1405,8 @@
         _galleryReady = false;
         _dataReady = false;
         _lastLoadError = "";
+        _gallerySortForce = false;
+        if (_gallerySortWaitTimer) { clearTimeout(_gallerySortWaitTimer); _gallerySortWaitTimer = null; }
         const ug = document.getElementById("userGallery");
         if (ug) ug.innerHTML = `<div class="empty-state">사진을 불러오는 중… <small style="opacity:.5">(v3)</small></div>`;
         const ag = document.getElementById("adminGallery");
@@ -1426,6 +1432,31 @@
        ========================================================= */
     function renderUserGallery() {
         const wrap = document.getElementById("userGallery");
+        if (!wrap) return;
+
+        // ── 1) 첫 표시 보류: 사진(_galleryReady)은 도착했지만 점검 기록(_dataReady,
+        //    분석자 수의 근거)이 아직이면 그리지 않고 잠시 기다린다.
+        //    → "기존 순서로 먼저 보였다가 잠시 뒤 재정렬되며 출렁이는" 문제 방지.
+        //    단, 기록 로드가 계속 실패할 수 있으므로 4초가 지나면 그냥 그린다(안전망).
+        if (_galleryReady && !_dataReady && !_gallerySortForce) {
+            if (!wrap.querySelector(".gallery-card")) {
+                wrap.innerHTML = `<div class="empty-state">사진을 정렬하는 중…</div>`;
+            }
+            if (!_gallerySortWaitTimer) {
+                _gallerySortWaitTimer = setTimeout(() => {
+                    _gallerySortWaitTimer = null;
+                    if (!_dataReady) { _gallerySortForce = true; renderUserGallery(); }
+                }, 4000);
+            }
+            return;
+        }
+        if (_dataReady && _gallerySortWaitTimer) {
+            clearTimeout(_gallerySortWaitTimer);
+            _gallerySortWaitTimer = null;
+        }
+        // 사진 자체가 아직이면 초기 '불러오는 중…' 문구를 유지한다.
+        if (!_galleryReady) return;
+
         const visible = photoList.filter((p) => !p.isHidden);
         // 의견(분석)을 올린 분석자 수가 적은 사진이 먼저(왼쪽/위쪽) 나오도록 정렬
         // 수가 같으면 기존 관리자 지정 순서(effOrder)를 유지 (sort는 안정 정렬)
@@ -1435,16 +1466,39 @@
             wrap.innerHTML = `<div class="empty-state">아직 등록된 점검 사진이 없습니다.<br>관리자가 사진을 추가하면 여기에 표시됩니다.</div>`;
             return;
         }
-        wrap.innerHTML = visible.map((p) => {
-            const cnt = entryList.filter((it) => it.photo === p.image).length;
+
+        // ── 2) DOM 재사용: innerHTML로 전부 새로 만들면 이미지가 다시 그려지며
+        //    깜빡일 수 있으므로, 이미 있는 카드는 '순서만 이동'하고 배지만 갱신한다.
+        //    (같은 <img> 노드를 재사용하면 브라우저가 다시 로드하지 않음)
+        const existing = new Map();
+        wrap.querySelectorAll(".gallery-card").forEach((c) => existing.set(c.dataset.img, c));
+        const keep = new Set();
+
+        visible.forEach((p) => {
+            const cnt = cntOf(p);
             const badge = cnt > 0 ? `<span class="reviewed-badge">${cnt}명 분석</span>` : `<span style="opacity:.85;">점검하기 →</span>`;
-            return `<div class="gallery-card" data-img="${esc(p.image)}">
-                        <img src="${p.image}" alt="현장 사진">
-                        <div class="meta">${badge}</div>
-                    </div>`;
-        }).join("");
-        wrap.querySelectorAll(".gallery-card").forEach((card) => {
-            card.addEventListener("click", () => selectPhoto(card.dataset.img));
+            let card = existing.get(p.image);
+            if (!card) {
+                card = document.createElement("div");
+                card.className = "gallery-card";
+                card.dataset.img = p.image;
+                const img = document.createElement("img");
+                img.src = p.image;
+                img.alt = "현장 사진";
+                const meta = document.createElement("div");
+                meta.className = "meta";
+                card.appendChild(img);
+                card.appendChild(meta);
+                card.addEventListener("click", () => selectPhoto(card.dataset.img));
+            }
+            card.querySelector(".meta").innerHTML = badge;
+            wrap.appendChild(card);   // 이미 있던 카드도 appendChild로 '이동' → 정렬 순서 반영
+            keep.add(p.image);
+        });
+
+        // 목록에서 빠진 카드(숨김/삭제)와 로딩 문구 등 카드가 아닌 요소 정리
+        Array.from(wrap.children).forEach((el) => {
+            if (!el.classList.contains("gallery-card") || !keep.has(el.dataset.img)) el.remove();
         });
     }
 
