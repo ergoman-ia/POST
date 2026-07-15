@@ -1068,8 +1068,7 @@
         if (_galleryReady) return;
         try {
             console.log("[점검앱] 사진 REST 폴백 시도");
-            await restLoadPhotos();
-            showToast("📷 사진을 불러왔습니다");
+            await restLoadPhotos();            
         } catch (e) {
             console.error("REST 폴백 실패:", e);
             _lastLoadError = (e && e.message) || String(e);
