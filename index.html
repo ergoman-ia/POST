@@ -526,6 +526,39 @@
         .use-chip.both { background: var(--primary-soft); color: var(--primary-dark); border-color: #bfdbfe; }
         .stale-chip { display: inline-block; font-size: .68rem; font-weight: 700; padding: 2px 8px; border-radius: 999px; background: #fef3c7; color: #b45309; border: 1px solid #fde68a; }
         .sel-hint { font-size: .8rem; font-weight: 600; }
+
+        /* ===== 진행 상태 오버레이 ===== */
+        .busy-overlay {
+            display: none; position: fixed; inset: 0; z-index: 1200; padding: 16px;
+            background: rgba(15, 23, 42, .62); backdrop-filter: blur(3px);
+            align-items: center; justify-content: center;
+        }
+        .busy-overlay.show { display: flex; animation: fade .15s ease; }
+        .busy-card {
+            background: var(--surface); border-radius: var(--radius); box-shadow: var(--shadow-lg);
+            padding: 26px 24px; width: 100%; max-width: 380px; text-align: center;
+        }
+        .busy-spin {
+            width: 44px; height: 44px; border: 4px solid var(--line); border-top-color: var(--admin);
+            border-radius: 50%; animation: spin 1s linear infinite; margin: 0 auto 16px;
+        }
+        .busy-card h3 { font-size: 1.05rem; }
+        .busy-bar { height: 6px; border-radius: 999px; background: var(--line); overflow: hidden; margin: 14px 0 12px; }
+        .busy-bar span {
+            display: block; height: 100%; width: 36%; border-radius: 999px;
+            background: linear-gradient(90deg, var(--primary), var(--admin));
+            animation: busyslide 1.3s ease-in-out infinite;
+        }
+        @keyframes busyslide { 0% { transform: translateX(-110%); } 100% { transform: translateX(320%); } }
+        .busy-step { margin: 0; font-size: .88rem; font-weight: 700; color: var(--ink); min-height: 1.3em; }
+        .busy-meta { margin: 9px 0 0; font-size: .76rem; color: var(--muted); }
+        .busy-note { margin: 9px 0 0; font-size: .78rem; color: var(--warn); font-weight: 700; display: none; }
+        .busy-note.show { display: block; }
+        .busy-steps { list-style: none; padding: 0; margin: 18px 0 0; text-align: left; display: flex; flex-direction: column; gap: 7px; }
+        .busy-steps li { font-size: .8rem; color: var(--faint); display: flex; gap: 9px; align-items: center; }
+        .busy-steps li .mk { width: 15px; text-align: center; flex: none; }
+        .busy-steps li.cur { color: var(--admin); font-weight: 800; }
+        .busy-steps li.done { color: var(--success); }
     </style>
 </head>
 
@@ -686,7 +719,9 @@
                 <h3 class="section-title" id="akPanelTitle">🎯 수준진단 정답 세트</h3>
                 <div class="ak-alert" id="akAlert"></div>
                 <p class="section-sub">분석자가 일정 인원 이상 참여한 사진에 대해, 유사한 지적을 AI가 하나로 통합한 <b>정답 세트</b>를 만들어 두면
-                    분석자 화면의 '나의 안전보건 수준 진단'에서 채점 기준으로 사용됩니다. 생성 후 <b>편집</b>으로 항목을 합치거나 동의어를 보완할 수 있습니다.</p>
+                    분석자 화면의 '나의 안전보건 수준 진단'에서 채점 기준으로 사용됩니다.
+                    정답 세트를 만들어도 <b>위험요인 입력은 그대로 계속됩니다.</b>
+                    생성 후에 새로 들어온 입력은 아래 표에 <b>🆕 표시</b>되므로, 내용을 보고 <b>다시 생성 · 편집 · 삭제</b>를 직접 판단하시면 됩니다.</p>
                 <div class="toolbar">
                     <span style="font-size:.85rem; font-weight:600;">진단 가능 최소 인원</span>
                     <input type="number" id="minAnalysts" min="1" max="200" value="10"
@@ -798,6 +833,19 @@
                 <button id="saveReGroupBtn" class="btn btn-primary" style="display:none;" onclick="App.saveReGrouped()">💾 재그룹 저장</button>
                 <button class="btn btn-ghost" onclick="App.closeModal()">닫기</button>
             </div>
+        </div>
+    </div>
+
+    <!-- 진행 상태 오버레이 -->
+    <div class="busy-overlay" id="busyOverlay">
+        <div class="busy-card">
+            <div class="busy-spin"></div>
+            <h3 id="busyTitle">처리 중…</h3>
+            <div class="busy-bar"><span></span></div>
+            <p class="busy-step" id="busyStepTxt"></p>
+            <p class="busy-meta"><b id="busyTime">0초</b> 경과 · 창을 닫지 마세요</p>
+            <p class="busy-note" id="busyNote">AI 응답이 조금 늦어지고 있습니다. 잠시만 더 기다려 주세요…</p>
+            <ol class="busy-steps" id="busySteps"></ol>
         </div>
     </div>
 
@@ -2538,7 +2586,10 @@
                 <div class="loading-spin"></div>
                 <h3 style="color:var(--primary);">AI가 안전보건 기준표로 분석 중입니다…</h3>
                 <p style="color:var(--muted);">부정어(미착용/X)·현장 용어·오타를 보정해 하나로 통합합니다.</p>
+                <p style="color:var(--faint); font-size:.82rem; margin-top:14px;">
+                    <b id="anaElapsed">0초</b> 경과 · 보통 10~30초 걸립니다. 창을 닫지 마세요.</p>
             </div>`;
+        startElapsed("anaElapsed");
 
         try {
             let flattened = [];
@@ -2547,8 +2598,10 @@
             }));
             const categories = getCategories();
             const grouped = await analyzeWithGemini(flattened, categories);
+            stopElapsed();
             renderGroupEditor(grouped);
         } catch (e) {
+            stopElapsed();
             console.error(e);
             document.getElementById("analysisBody").innerHTML =
                 `<div style="color:var(--danger); text-align:center; padding:20px;"><b>💥 분석 오류</b><br>${esc(e.message)}</div>`;
@@ -2701,17 +2754,21 @@ ${JSON.stringify(issuesArr)}
             photoId: photo ? photo.id : "",
             analystCount: c.count,
             builtAt: Date.now(),
-            usage: exists ? (exists.usage || "quiz") : "quiz",
+            usage: usageOf(exists),
             items
         };
+        busyShow("🎯 정답 세트로 저장", ["항목 정리", "서버에 저장"]);
+        busyStep(1);
         try {
             await persistAnswerKey(ak);
+            busyHide();
             closeModal();
             renderAnswerKeyPanel();
             renderUserGallery();
             showToast("🎯 정답 세트로 저장했습니다 (" + items.length + "개 항목)");
             editAnswerKey(ak.sig);
         } catch (e) {
+            busyHide();
             console.error(e);
             showToast("❌ 저장 실패: " + (e.message || e));
         }
@@ -2980,17 +3037,27 @@ ${JSON.stringify(issuesArr)}
     let _akEditSig = null;
     let _akCtx = null;              // 관리자 표에서 선택한 항목의 사진/인원 정보
 
-    // 사진 이용 상태: "quiz" = 진단 전용(입력 마감) / "both" = 계속 수집 + 진단
-    function usageOf(ak) { return (ak && ak.usage === "both") ? "both" : (ak ? "quiz" : "both"); }
+    // 사진 이용 상태 — 기본값은 언제나 "both"(계속 수집 + 진단).
+    // "quiz"(진단 전용 = 입력 마감)는 관리자가 명시적으로 선택했을 때만 적용된다.
+    function usageOf(ak) { return (ak && ak.usage === "quiz") ? "quiz" : "both"; }
     function isQuizOnly(photoImage) {
         const ak = getAnswerKey(photoImage);
         return !!ak && usageOf(ak) === "quiz";
     }
-    // 정답 세트를 만든 뒤 분석자가 크게 늘었으면 갱신을 권한다.
-    function isStale(ak, nowCount) {
-        if (!ak || usageOf(ak) !== "both") return false;
-        const base = ak.analystCount || 0;
-        return nowCount >= base + Math.max(3, Math.ceil(base * 0.3));
+    // 정답 세트를 만든 '이후'에 들어온 입력 건수 (관리자 판단용)
+    function newSince(photoImage, ak) {
+        if (!ak) return 0;
+        const t = ak.builtAt || 0;
+        return entryList.filter((it) => it.photo === photoImage && (it.timestamp || 0) > t).length;
+    }
+    // 생성 이후 새로 입력한 사람 이름 (최대 몇 명만)
+    function newNames(photoImage, ak, max) {
+        if (!ak) return [];
+        const t = ak.builtAt || 0;
+        const names = entryList
+            .filter((it) => it.photo === photoImage && (it.timestamp || 0) > t)
+            .map((it) => it.name || "익명");
+        return [...new Set(names)].slice(0, max || 4);
     }
 
     function quizMin() {
@@ -3044,7 +3111,7 @@ ${JSON.stringify(issuesArr)}
                     photoId: d.photoId || "",
                     analystCount: Number(d.analystCount || 0),
                     builtAt: Number(d.builtAt || 0),
-                    usage: (d.usage === "both") ? "both" : "quiz",
+                    usage: (d.usage === "quiz") ? "quiz" : "both",
                     items
                 };
             });
@@ -3108,13 +3175,68 @@ ${JSON.stringify(issuesArr)}
         delete answerKeys[sig];
     }
 
+    /* ---------- 진행 상태 오버레이 ---------- */
+    let _busyT0 = 0, _busyTimer = null, _busySteps = [], _busyIdx = -1;
+
+    function busyShow(title, steps) {
+        _busySteps = steps || [];
+        _busyIdx = -1;
+        _busyT0 = Date.now();
+        const t = document.getElementById("busyTitle"); if (t) t.textContent = title;
+        const s = document.getElementById("busyStepTxt"); if (s) s.textContent = "";
+        const nt = document.getElementById("busyNote"); if (nt) nt.classList.remove("show");
+        renderBusySteps();
+        const ov = document.getElementById("busyOverlay"); if (ov) ov.classList.add("show");
+        clearInterval(_busyTimer);
+        _busyTimer = setInterval(() => {
+            const sec = Math.floor((Date.now() - _busyT0) / 1000);
+            const el = document.getElementById("busyTime"); if (el) el.textContent = sec + "초";
+            if (sec >= 20) { const w = document.getElementById("busyNote"); if (w) w.classList.add("show"); }
+        }, 250);
+    }
+    // i 번째 단계로 이동 (note 로 문구를 덮어쓸 수 있음)
+    function busyStep(i, note) {
+        _busyIdx = Number(i) || 0;
+        const s = document.getElementById("busyStepTxt");
+        if (s) s.textContent = note || _busySteps[_busyIdx] || "";
+        renderBusySteps();
+    }
+    function busyHide() {
+        clearInterval(_busyTimer); _busyTimer = null;
+        const ov = document.getElementById("busyOverlay"); if (ov) ov.classList.remove("show");
+    }
+    function renderBusySteps() {
+        const ol = document.getElementById("busySteps");
+        if (!ol) return;
+        ol.innerHTML = _busySteps.map((s, i) => {
+            const cls = i < _busyIdx ? "done" : (i === _busyIdx ? "cur" : "");
+            const mk = i < _busyIdx ? "✓" : (i === _busyIdx ? "●" : "○");
+            return `<li class="${cls}"><span class="mk">${mk}</span>${esc(s)}</li>`;
+        }).join("");
+    }
+
+    // 모달 안 등에서 쓰는 가벼운 경과 시간 표시
+    let _elapTimer = null;
+    function startElapsed(elId) {
+        stopElapsed();
+        const t0 = Date.now();
+        _elapTimer = setInterval(() => {
+            const el = document.getElementById(elId);
+            if (!el) { stopElapsed(); return; }
+            el.textContent = Math.floor((Date.now() - t0) / 1000) + "초";
+        }, 250);
+    }
+    function stopElapsed() { if (_elapTimer) { clearInterval(_elapTimer); _elapTimer = null; } }
+
     /* ---------- Gemini 공통 ---------- */
-    async function askGemini(prompt) {
+    // onModelReady: 모델 로딩이 끝나고 실제 AI 응답을 기다리기 시작할 때 호출된다.
+    async function askGemini(prompt, onModelReady) {
         if (!window.GEMINI_API_KEY) throw new Error("Gemini API 키가 없습니다 (secrets.js 확인)");
         const { GoogleGenerativeAI } = await import("https://esm.run/@google/generative-ai");
         const genAI = new GoogleGenerativeAI(window.GEMINI_API_KEY);
         const model = genAI.getGenerativeModel({ model: "gemini-3-flash-preview" });
-        const result = await model.generateContent(prompt);
+        if (typeof onModelReady === "function") onModelReady();
+        const result = await withTimeout(model.generateContent(prompt), 120000, "AI 응답");
         return (await result.response).text();
     }
     function parseJsonLoose(raw) {
@@ -3237,7 +3359,11 @@ ${JSON.stringify(flat)}
 `;
     }
 
-    async function buildAnswerKey(photoImage) {
+    const AK_STEPS = ["점검 기록 정리", "AI 모델 준비", "유사 항목 통합 (AI 응답 대기)", "결과 정리", "정답 세트 저장"];
+
+    async function buildAnswerKey(photoImage, onStep) {
+        const step = (typeof onStep === "function") ? onStep : function () { };
+        step(0);
         const entries = entryList.filter((e) => e.photo === photoImage);
         if (entries.length === 0) throw new Error("이 사진에는 등록된 분석 결과가 없습니다");
 
@@ -3256,7 +3382,10 @@ ${JSON.stringify(flat)}
         });
         if (flat.length === 0) throw new Error("통합할 지적 사항이 없습니다");
 
-        let groups = parseJsonLoose(await askGemini(akPrompt(getCategories(), flat)));
+        step(1, `AI 모델 준비 중 · 지적 ${flat.length}건 / 분석자 ${entries.length}명`);
+        const raw = await askGemini(akPrompt(getCategories(), flat), () => step(2));
+        step(3);
+        let groups = parseJsonLoose(raw);
         if (!Array.isArray(groups)) groups = groups.groups || groups.items || groups.result || [];
         if (!Array.isArray(groups) || groups.length === 0) throw new Error("AI가 통합 결과를 만들지 못했습니다");
 
@@ -3291,7 +3420,7 @@ ${JSON.stringify(flat)}
             photoId: photo ? photo.id : "",
             analystCount: total,
             builtAt: Date.now(),
-            usage: prev ? usageOf(prev) : "quiz",   // 새로 만들면 기본 '진단 전용'
+            usage: usageOf(prev),   // 기본은 '계속 수집 + 진단' — 입력을 막지 않는다
             items
         };
     }
@@ -3330,8 +3459,8 @@ ${JSON.stringify(I)}
 `;
     }
 
-    async function aiMatch(inputs, answers) {
-        const parsed = parseJsonLoose(await askGemini(gradePrompt(inputs, answers)));
+    async function aiMatch(inputs, answers, onStep) {
+        const parsed = parseJsonLoose(await askGemini(gradePrompt(inputs, answers), onStep));
         const arr = Array.isArray(parsed) ? parsed : (parsed.matches || []);
         if (!Array.isArray(arr)) throw new Error("매칭 결과 형식 오류");
         return arr.map((m) => ({
@@ -3341,15 +3470,22 @@ ${JSON.stringify(I)}
         }));
     }
 
-    async function gradeQuiz(inputs, key) {
+    const GRADE_STEPS = ["내 입력 정리", "AI 모델 준비", "정답과 의미 비교 (AI 응답 대기)", "점수 계산"];
+
+    async function gradeQuiz(inputs, key, onStep) {
+        const step = (typeof onStep === "function") ? onStep : function () { };
+        step(0);
         const answers = key.items || [];
         let matches = null, byAI = false;
-        try { matches = await aiMatch(inputs, answers); byAI = true; }
+        step(1);
+        try { matches = await aiMatch(inputs, answers, () => step(2)); byAI = true; }
         catch (e) { console.warn("AI 채점 실패 → 로컬 유사도 매칭 사용:", e); }
         if (!matches || matches.length === 0) {
+            step(2, "유사도 기준으로 채점하는 중…");
             matches = localMatchAll(inputs, answers);
             byAI = false;
         }
+        step(3);
 
         // same 먼저 확정 → 그다음 broader (부분 인정)
         matches.sort((a, b) => (a.relation === "same" ? 0 : 1) - (b.relation === "same" ? 0 : 1));
@@ -3460,13 +3596,16 @@ ${JSON.stringify(I)}
                 "이 사진의 <b>정답 세트</b>가 아직 없습니다.<br>" +
                 "지금 AI가 " + cnt + "명의 지적 사항을 통합해<br>정답 세트를 만들까요? (10~30초)");
             if (!ok) return;
-            showToast("🤖 유사 항목을 통합하는 중…");
+            busyShow(`🎯 정답 세트 생성 · 분석자 ${cnt}명`, AK_STEPS);
             try {
-                ak = await buildAnswerKey(src);
+                ak = await buildAnswerKey(src, busyStep);
+                busyStep(4);
                 await persistAnswerKey(ak);
+                busyHide();
                 showToast("✅ 정답 세트를 만들었습니다 (" + ak.items.length + "개 항목)");
                 renderAnswerKeyPanel();
             } catch (e) {
+                busyHide();
                 console.error(e);
                 showToast("❌ 정답 세트 생성 실패: " + (e.message || e));
                 return;
@@ -3526,12 +3665,14 @@ ${JSON.stringify(I)}
         submitQuiz._busy = true;
         const btn = document.getElementById("submitMainBtn");
         if (btn) btn.disabled = true;
-        showToast("🤖 채점 중입니다…");
+        busyShow(`📊 채점 중 · 내 입력 ${inputs.length}개`, GRADE_STEPS);
         try {
-            const res = await gradeQuiz(inputs, quizKey);
+            const res = await gradeQuiz(inputs, quizKey, busyStep);
+            busyHide();
             lastQuizResult = res;
             renderQuizResult(res);
         } catch (e) {
+            busyHide();
             console.error(e);
             showToast("❌ 채점 실패: " + (e.message || e));
         } finally {
@@ -3627,11 +3768,12 @@ ${JSON.stringify(I)}
         const rows = photoList.map((p) => {
             const cnt = analystsOf(p.image);
             const ak = getAnswerKey(p.image);
-            return { p, cnt, ak, pending: cnt >= mn && !ak, stale: isStale(ak, cnt) };
+            const fresh = newSince(p.image, ak);
+            return { p, cnt, ak, fresh, pending: cnt >= mn && !ak, stale: fresh > 0 };
         });
-        // 생성 대기 → 갱신 권장 → 참여자 많은 순
+        // 생성 대기 → 신규 입력 많은 순 → 참여자 많은 순
         rows.sort((a, b) =>
-            (b.pending - a.pending) || (b.stale - a.stale) || (b.cnt - a.cnt));
+            (b.pending - a.pending) || (b.fresh - a.fresh) || (b.cnt - a.cnt));
 
         const pend = rows.filter((r) => r.pending);
         const stale = rows.filter((r) => r.stale);
@@ -3648,7 +3790,9 @@ ${JSON.stringify(I)}
                            아래 표 맨 위에서 <b>🤖 생성</b>을 누르면 유사 항목을 AI가 통합해 정답을 만듭니다.<br>`
                         : "")
                     + (stale.length
-                        ? `정답 세트를 만든 뒤 분석자가 크게 늘어 <b>갱신을 권하는 사진이 ${stale.length}장</b> 있습니다.`
+                        ? `정답 세트를 만든 뒤 <b>새로 입력한 분석자가 있는 사진이 ${stale.length}장</b> 있습니다.
+                           내용을 확인하고 <b>다시 생성</b>할지, 지금 정답 세트를 <b>편집</b>할지 판단하세요.
+                           <span style="color:var(--muted)">(그대로 두어도 진단은 정상 동작합니다.)</span>`
                         : "")
                     + "</div>";
             } else {
@@ -3664,11 +3808,21 @@ ${JSON.stringify(I)}
         tb.innerHTML = rows.map((r) => {
             const ready = r.cnt >= mn;
             const use = r.ak ? usageOf(r.ak) : null;
+            const nn = r.ak ? newNames(r.p.image, r.ak, 4) : [];
+            const freshTxt = r.fresh > 0
+                ? `<div style="margin-top:5px;">
+                     <span class="stale-chip">🆕 생성 후 새 입력 ${r.fresh}건</span>
+                     <span style="color:var(--muted); font-size:.75rem;"> ${esc(nn.join(", "))}${r.fresh > nn.length ? " 외" : ""}</span>
+                     <button class="btn btn-ghost btn-sm" style="padding:4px 9px; font-size:.74rem;"
+                        onclick="App.akShowEntries('${r.p.id}')">🔍 내용 보기</button>
+                   </div>`
+                : "";
             const akTxt = r.ak
                 ? `<b>${r.ak.items.length}개 항목</b> · 핵심 ${coreItems(r.ak).length}개
-                   ${r.stale ? `<span class="stale-chip">갱신 권장</span>` : ""}<br>
-                   <span class="use-chip ${use}" onclick="App.akToggleUsage('${r.ak.sig}')">${use === "quiz" ? "🔒 진단 전용 (입력 마감)" : "🔁 계속 수집 + 진단"}</span>
-                   <span style="color:var(--faint); font-size:.75rem;"> ${new Date(r.ak.builtAt || 0).toLocaleDateString("ko-KR")} · ${r.ak.analystCount}명 기준</span>`
+                   <span style="color:var(--faint); font-size:.75rem;">
+                     ${new Date(r.ak.builtAt || 0).toLocaleDateString("ko-KR")} 생성 · ${r.ak.analystCount}명 기준</span><br>
+                   <span class="use-chip ${use}" onclick="App.akToggleUsage('${r.ak.sig}')">${use === "quiz" ? "🔒 진단 전용 (입력 마감)" : "🔁 입력 계속 받는 중"}</span>
+                   ${freshTxt}`
                 : (r.pending
                     ? `<b style="color:var(--warn)">🔔 생성 대기</b> <span style="color:var(--muted)">— 지금 만들 수 있습니다</span>`
                     : `<span style="color:var(--faint);">없음 — 분석자 ${mn}명 이상 필요</span>`);
@@ -3677,11 +3831,23 @@ ${JSON.stringify(I)}
                 <td style="text-align:center; font-weight:800; color:${ready ? "var(--success)" : "var(--faint)"}">${r.cnt}명</td>
                 <td>${akTxt}</td>
                 <td style="white-space:nowrap;">
-                    <button class="btn btn-success btn-sm" ${ready ? "" : "disabled"} onclick="App.makeAnswerKey('${r.p.id}')">${r.ak ? "↻ 다시 생성" : "🤖 생성"}</button>
+                    <button class="btn ${r.fresh > 0 ? "btn-admin" : "btn-success"} btn-sm" ${ready ? "" : "disabled"}
+                        onclick="App.makeAnswerKey('${r.p.id}')">${r.ak ? "↻ 다시 생성" : "🤖 생성"}</button>
                     ${r.ak ? `<button class="btn btn-ghost btn-sm" onclick="App.editAnswerKey('${r.ak.sig}')">✏️ 편집</button>
                               <button class="btn btn-ghost btn-sm" onclick="App.removeAnswerKey('${r.ak.sig}')">🗑</button>` : ""}
                 </td></tr>`;
         }).join("");
+    }
+
+    // 이 사진의 입력 내역을 '분석 결과 관리' 표에서 바로 확인
+    function akShowEntries(photoId) {
+        const p = photoList.find((x) => x.id === photoId);
+        if (!p) return;
+        filteredPhoto = p.image;
+        renderTable();
+        const el = document.getElementById("adminTable");
+        if (el) el.scrollIntoView({ behavior: "smooth", block: "start" });
+        showToast("🔍 이 사진의 입력 내역만 표시합니다 (최신 입력이 위)");
     }
 
     // 진단 전용 ↔ 계속 수집 전환
@@ -3690,14 +3856,15 @@ ${JSON.stringify(I)}
         if (!ak) return;
         const next = usageOf(ak) === "quiz" ? "both" : "quiz";
         const ok = await customConfirm(next === "both"
-            ? "이 사진을 <b>'계속 수집 + 진단'</b>으로 바꿉니다.<br>분석자가 계속 위험요인을 입력할 수 있게 되지만,<br>진단에서 정답을 본 사람이 그대로 입력해 <b>데이터가 오염될 수 있습니다.</b>"
-            : "이 사진을 <b>'진단 전용'</b>으로 바꿉니다.<br>'위험요인 찾기' 갤러리에서 숨겨져 <b>더 이상 입력을 받지 않습니다.</b>");
+            ? "이 사진의 <b>위험요인 입력을 다시 엽니다.</b><br>'위험요인 찾기' 갤러리에 다시 표시됩니다."
+            : "이 사진을 <b>'진단 전용'</b>으로 바꿉니다.<br>'위험요인 찾기' 갤러리에서 숨겨져 <b>더 이상 입력을 받지 않습니다.</b><br>"
+              + "<span style='color:#b45309'>시험 문제로 고정할 때만 사용하세요. 기본값은 '입력 계속'입니다.</span>");
         if (!ok) return;
         try {
             await persistAnswerKey({ ...ak, usage: next });
             renderAnswerKeyPanel();
             renderUserGallery();
-            showToast(next === "quiz" ? "🔒 진단 전용으로 바꿨습니다" : "🔁 계속 수집으로 바꿨습니다");
+            showToast(next === "quiz" ? "🔒 진단 전용으로 바꿨습니다 (입력 마감)" : "🔁 입력을 다시 받습니다");
         } catch (e) { showToast("❌ 변경 실패: " + (e.message || e)); }
     }
 
@@ -3710,17 +3877,18 @@ ${JSON.stringify(I)}
             const ok = await customConfirm("기존 정답 세트를 <b>덮어씁니다</b>.<br>편집한 내용도 사라집니다. 계속할까요?");
             if (!ok) return;
         }
-        showToast("🤖 " + cnt + "명의 지적 사항을 통합하는 중…");
+        busyShow(`🎯 정답 세트 생성 · 분석자 ${cnt}명`, AK_STEPS);
         try {
-            const ak = await buildAnswerKey(p.image);
+            const ak = await buildAnswerKey(p.image, busyStep);
+            busyStep(4);
             await persistAnswerKey(ak);
+            busyHide();
             renderAnswerKeyPanel();
             renderUserGallery();
-            showToast(usageOf(ak) === "quiz"
-                ? "✅ 생성 완료 (" + ak.items.length + "개) · 이 사진은 '진단 전용'으로 전환됐습니다"
-                : "✅ 정답 세트 생성 완료 (" + ak.items.length + "개 항목)");
+            showToast("✅ 정답 세트 생성 완료 (" + ak.items.length + "개 항목) · 위험요인 입력은 계속됩니다");
             editAnswerKey(ak.sig);
         } catch (e) {
+            busyHide();
             console.error(e);
             showToast("❌ 생성 실패: " + (e.message || e));
         }
@@ -3830,12 +3998,17 @@ ${JSON.stringify(I)}
         const items = readAkEditor();
         if (items.length === 0) { showToast("항목이 없습니다"); return; }
         items.sort((a, b) => (b.support - a.support) || a.title.localeCompare(b.title, "ko"));
+        busyShow("💾 정답 세트 저장", ["서버에 저장"]);
+        busyStep(0);
         try {
             await persistAnswerKey({ ...ak, items, builtAt: ak.builtAt || Date.now() });
+            busyHide();
             renderAnswerKeyPanel();
+            renderUserGallery();
             closeAkModal();
             showToast("💾 정답 세트를 저장했습니다");
         } catch (e) {
+            busyHide();
             console.error(e);
             showToast("❌ 저장 실패: " + (e.message || e));
         }
@@ -4037,7 +4210,7 @@ ${JSON.stringify(I)}
         /* --- 정답 세트 관리(관리자) --- */
         saveMinAnalysts, refreshAnswerKeys, makeAnswerKey, editAnswerKey, removeAnswerKey,
         akToggleCore, akDelItem, akAddItem, akMerge, akSave, closeAkModal,
-        akToggleUsage, saveAsAnswerKey
+        akToggleUsage, saveAsAnswerKey, akShowEntries
     };
 })();
 
