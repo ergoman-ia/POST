@@ -398,7 +398,11 @@
         @keyframes spin { to { transform: rotate(360deg); } }
         .group-box { border: 1px solid var(--line); border-left: 5px solid var(--faint); border-radius: var(--radius-sm); padding: 14px; margin-bottom: 12px; background: var(--bg); }
         .group-box.is-group { border-left-color: var(--primary); }
-        .group-tag { font-weight: 700; padding: 3px 9px; border-radius: 6px; color: #fff; font-size: .72rem; margin-right: 8px; }
+        .group-tag { font-weight: 700; padding: 3px 9px; border-radius: 6px; color: #fff; font-size: .72rem; margin-right: 8px; flex: none; }
+        /* [수정26] 그룹 머리말: 분류(칩) · 대표 용어(굵은 검정) · 건수 */
+        .gb-head { display: flex; align-items: center; gap: 4px; flex-wrap: wrap; border-bottom: 1px solid var(--line); padding-bottom: 7px; }
+        .gb-head .kw { font-size: 1rem; font-weight: 800; color: #111827; line-height: 1.4; }
+        .gb-head .gb-count { margin-left: auto; font-size: .72rem; font-weight: 700; color: var(--muted); flex: none; }
         .tag-group { background: var(--primary); }
         .tag-single { background: var(--faint); }
         .group-box ul { list-style: none; padding: 0; margin: 10px 0 0; min-height: 38px; }
@@ -2922,19 +2926,25 @@ ${JSON.stringify(issuesArr)}
             💡 항목을 <b>한 번 누르면</b> 아래에 옮길 그룹 목록이 나옵니다. 드래그로 옮겨도 됩니다.<br>
             <b>더블클릭</b>하면 그 항목이 그룹의 대표(핵심키워드)가 됩니다.</p>`;
         groups.forEach((g, idx) => {
-            const isGroup = g.members.length > 1;
-            const repText = g.representative_text || g.members[0].text;
-            let items = `<li id="it-${idx}-rep" class="drag-item is-rep" draggable="true" data-text="${esc(repText)}" data-name="AI추천">
-                            ${esc(repText)}</li>`;
-            g.members.forEach((m, mi) => {
-                items += `<li id="it-${idx}-${mi}" class="drag-item" draggable="true" data-text="${esc(m.text)}" data-name="${esc(m.name)}">
-                            <span class="who">(${esc(m.name)})</span> ${esc(m.text)}</li>`;
-            });
+            /* [수정26] AI가 만든 대표 표현을 '목록 항목'으로 넣지 않는다.
+               ─ 이전 동작의 문제 ─
+               맨 위 항목(data-name="AI추천")은 누가 적은 것이 아니라 AI가 지어낸
+               문구였는데, 실제 입력들과 같은 <li> 로 섞여 있었다. 그래서
+                 · 이름 없는 위험요인처럼 보이고, 다른 그룹으로 옮길 수도 있었다
+                 · 보고서 '구성 내용'에 실제 입력이 아닌 문장이 한 줄 끼어들었다
+                 · 비율 분모(전체 항목 수)에도 포함돼 모든 비율이 틀렸다
+               대표 표현은 '항목'이 아니라 그룹의 이름이다. 머리말로 올린다. */
+            const isGroup = (g.members || []).length > 1;
+            const repText = g.representative_text || ((g.members || [])[0] || {}).text || g.category;
+            const items = (g.members || []).map((m, mi) =>
+                `<li id="it-${idx}-${mi}" class="drag-item" draggable="true" data-text="${esc(m.text)}" data-name="${esc(m.name)}">
+                    <span class="who">(${esc(m.name)})</span> ${esc(m.text)}</li>`).join("");
             body.insertAdjacentHTML("beforeend", `
                 <div class="group-box ${isGroup ? "is-group" : ""}" data-cat="${esc(g.category)}">
-                    <div style="border-bottom:1px solid var(--line); padding-bottom:7px;">
+                    <div class="gb-head">
                         <span class="group-tag ${isGroup ? "tag-group" : "tag-single"}">${esc(g.category)}</span>
-                        <strong class="kw">${esc(g.category)}</strong>
+                        <strong class="kw">${esc(repText)}</strong>
+                        <span class="gb-count">${(g.members || []).length}건</span>
                     </div>
                     <ul>${items}</ul>
                 </div>`);
@@ -3025,10 +3035,11 @@ ${JSON.stringify(issuesArr)}
         detachRep(li);
         const box = document.createElement("div");
         box.className = "group-box";
-        box.setAttribute("data-cat", text);
-        box.innerHTML = `<div style="border-bottom:1px solid var(--line); padding-bottom:7px;">
-                <span class="group-tag tag-single">개별</span>
+        box.setAttribute("data-cat", "신규");
+        box.innerHTML = `<div class="gb-head">
+                <span class="group-tag tag-single">신규</span>
                 <strong class="kw">${esc(text)}</strong>
+                <span class="gb-count">0건</span>
             </div><ul></ul>`;
         document.getElementById("analysisBody").appendChild(box);
         box.querySelector("ul").appendChild(li);
@@ -3080,17 +3091,26 @@ ${JSON.stringify(issuesArr)}
         const isGroup = items.length > 1;
         box.className = `group-box ${isGroup ? "is-group" : ""}`;
         const tag = box.querySelector(".group-tag");
+        /* [수정26] 분류 이름을 '그룹/개별'로 갈아치우지 않는다.
+           항목을 하나 옮겼다고 '보호구/PPE'가 '그룹'으로 바뀌면
+           이 그룹이 무엇에 대한 것인지 알 수 없게 된다. 색으로만 구분한다. */
         tag.className = `group-tag ${isGroup ? "tag-group" : "tag-single"}`;
-        tag.textContent = isGroup ? "그룹" : "개별";
-        if (!box.querySelector(".is-rep")) setRep(items[0]);
+        tag.textContent = box.getAttribute("data-cat") || tag.textContent;
+        const cnt = box.querySelector(".gb-count");
+        if (cnt) cnt.textContent = items.length + "건";
+        // 대표 용어(.kw)는 사용자가 더블클릭으로 바꾸기 전까지 그대로 둔다.
     }
 
+    /* [수정26] 더블클릭 = 이 입력을 그룹의 핵심키워드로 삼는다.
+       AI가 제안한 용어가 어색할 때 실제 입력 문구로 바꾸기 위한 기능이다.
+       항목 자체는 목록에 그대로 남는다(사라지거나 옮겨지지 않는다). */
     function setRep(el) {
         const ul = el.parentElement;
-        ul.querySelectorAll(".is-rep").forEach((li) => { li.classList.remove("is-rep"); li.querySelector(".badge-rep")?.remove(); });
+        ul.querySelectorAll(".is-rep").forEach((li) => { li.classList.remove("is-rep"); const b = li.querySelector(".badge-rep"); if (b) b.remove(); });
         el.classList.add("is-rep");
         el.insertAdjacentHTML("afterbegin", '<span class="badge-rep">[기준] </span>');
         ul.closest(".group-box").querySelector(".kw").textContent = el.getAttribute("data-text");
+        showToast("핵심키워드를 이 문구로 바꿨습니다");
     }
 
     /* 재그룹 저장 / 보고서 */
@@ -3100,7 +3120,8 @@ ${JSON.stringify(issuesArr)}
         savedReport = Array.from(boxes).map((box) => {
             const items = Array.from(box.querySelectorAll("li"));
             return {
-                type: box.querySelector(".group-tag").textContent,
+                type: (box.querySelectorAll("li").length > 1) ? "그룹" : "개별",
+                category: box.getAttribute("data-cat") || "",
                 keyword: box.querySelector(".kw").textContent,
                 content: items.map((li) => `- ${li.getAttribute("data-text")}`).join("<br>"),
                 rawItems: items.map((li) => ({ text: li.getAttribute("data-text"), name: li.getAttribute("data-name") })),
@@ -3192,20 +3213,23 @@ ${JSON.stringify(issuesArr)}
         document.getElementById("modalTitle").textContent = "🤖 유사 항목 분석 결과";
         document.getElementById("saveReGroupBtn").style.display = "inline-flex";
         const body = document.getElementById("analysisBody");
-        body.innerHTML = `<p style="font-size:.82rem; color:var(--muted); margin:0 0 14px;">💡 드래그로 이동, 더블클릭으로 대표 항목 지정.</p>`;
+        body.innerHTML = `<p style="font-size:.82rem; color:var(--muted); margin:0 0 14px; line-height:1.7;">💡 항목을 <b>한 번 누르면</b> 옮길 그룹 목록이 나옵니다. <b>더블클릭</b>하면 그 문구가 핵심키워드가 됩니다.</p>`;
         savedReport.forEach((report, idx) => {
-            const isGroup = report.type === "그룹";
-            const lines = report.content.split("<br>").map((s) => s.replace(/^- /, ""));
-            const items = lines.map((txt, mi) => {
-                const first = mi === 0;
-                return `<li id="edit-${idx}-${mi}" class="drag-item ${first ? "is-rep" : ""}" draggable="true" data-text="${esc(txt)}">
-                            ${first ? '<span class="badge-rep">[기준] </span>' : ""}${esc(txt)}</li>`;
-            }).join("");
+            /* [수정26] 저장본에는 실제 입력만 들어 있다(AI 문구는 keyword 로 따로 보관).
+               rawItems 가 있으면 이름까지 되살린다. */
+            const raw = Array.isArray(report.rawItems) && report.rawItems.length
+                ? report.rawItems
+                : report.content.split("<br>").map((t) => ({ text: t.replace(/^- /, ""), name: "" }));
+            const isGroup = raw.length > 1;
+            const items = raw.map((m, mi) =>
+                `<li id="edit-${idx}-${mi}" class="drag-item" draggable="true" data-text="${esc(m.text)}" data-name="${esc(m.name || "")}">
+                    ${m.name ? `<span class="who">(${esc(m.name)})</span> ` : ""}${esc(m.text)}</li>`).join("");
             body.insertAdjacentHTML("beforeend", `
-                <div class="group-box ${isGroup ? "is-group" : ""}" data-cat="${esc(report.keyword)}">
-                    <div style="border-bottom:1px solid var(--line); padding-bottom:7px;">
-                        <span class="group-tag ${isGroup ? "tag-group" : "tag-single"}">${esc(report.type)}</span>
+                <div class="group-box ${isGroup ? "is-group" : ""}" data-cat="${esc(report.category || report.type || report.keyword)}">
+                    <div class="gb-head">
+                        <span class="group-tag ${isGroup ? "tag-group" : "tag-single"}">${esc(report.category || report.type || report.keyword)}</span>
                         <strong class="kw">${esc(report.keyword)}</strong>
+                        <span class="gb-count">${raw.length}건</span>
                     </div>
                     <ul>${items}</ul>
                 </div>`);
