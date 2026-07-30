@@ -339,7 +339,6 @@
             display: flex; flex-wrap: wrap; gap: 8px; align-items: center;
             background: #fffbeb; border: 1px solid #fde68a; border-radius: var(--radius-sm); padding: 12px; margin: 14px 0;
         }
-        .toolbar .date-group { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
         .toolbar input[type="date"] { width: auto; padding: 8px 10px; font-size: .85rem; }
         .spacer { flex: 1; }
 
@@ -481,6 +480,11 @@
             .post-it .img { position: absolute; right: 4px; bottom: 4px; width: 52%; height: 52%; opacity: .22; }
             .post-it .img img { width: 100%; height: 100%; object-fit: contain; }
 
+            /* [수정27] 화면 전용 요소는 인쇄에서 제외한다.
+               지금은 #printLayer 만 인쇄되므로 실질적 영향은 없지만,
+               클래스 이름이 약속하는 동작을 실제로 갖고 있게 한다. */
+            .no-print { display: none !important; }
+
             /* ===== 보고서(그룹) 모드 ===== */
             .print-report { width: 100%; color: #000; }
             .print-report h1 { font-size: 22pt; margin: 0; }
@@ -588,7 +592,6 @@
         .use-chip.quiz { background: var(--admin-soft); color: #6d28d9; border-color: #ddd6fe; }
         .use-chip.both { background: var(--primary-soft); color: var(--primary-dark); border-color: #bfdbfe; }
         .stale-chip { display: inline-block; font-size: .68rem; font-weight: 700; padding: 2px 8px; border-radius: 999px; background: #fef3c7; color: #b45309; border: 1px solid #fde68a; }
-        .sel-hint { font-size: .8rem; font-weight: 600; }
 
         /* ===== 진행 상태 오버레이 ===== */
         .busy-overlay {
@@ -2997,7 +3000,10 @@ ${JSON.stringify(issuesArr)}
                 <button type="button" class="mm-new" data-i="new">➕ 새 그룹으로 분리</button>
             </div>
             <button type="button" class="mm-cancel">닫기</button>`;
-        li.insertAdjacentElement("afterend", menu);
+        /* [수정27] ul 안에 div 를 넣지 않는다.
+           ul 의 자식은 li 여야 하고, li 로 넣으면 항목 수·비율 집계에 섞인다.
+           그룹 상자 안, 목록 바로 아래에 붙인다. */
+        li.closest(".group-box").appendChild(menu);
 
         menu.querySelector(".mm-cancel").addEventListener("click", closeMoveMenu);
         menu.querySelectorAll(".mm-list button").forEach((btn) => {
@@ -3115,19 +3121,28 @@ ${JSON.stringify(issuesArr)}
 
     /* 재그룹 저장 / 보고서 */
     function saveReGrouped() {
+        closeMoveMenu();                      // [수정27] 열려 있던 이동 메뉴를 먼저 정리
         const boxes = document.querySelectorAll(".group-box");
         const total = Array.from(boxes).reduce((a, b) => a + b.querySelectorAll("li").length, 0);
         savedReport = Array.from(boxes).map((box) => {
             const items = Array.from(box.querySelectorAll("li"));
             return {
-                type: (box.querySelectorAll("li").length > 1) ? "그룹" : "개별",
+                type: (items.length > 1) ? "그룹" : "개별",
                 category: box.getAttribute("data-cat") || "",
                 keyword: box.querySelector(".kw").textContent,
                 content: items.map((li) => `- ${li.getAttribute("data-text")}`).join("<br>"),
                 rawItems: items.map((li) => ({ text: li.getAttribute("data-text"), name: li.getAttribute("data-name") })),
+                count: items.length,
                 ratio: ((items.length / total) * 100).toFixed(1) + "%"
             };
         });
+
+        /* [수정28] 보고서는 '많이 지적된 순'으로 세운다.
+           화면의 그룹 순서는 AI가 내놓은 순서일 뿐 중요도와 무관하다.
+           보고서를 받아 보는 사람은 어느 위험요인이 가장 많이 지적됐는지를
+           먼저 알아야 하므로, 점유 비율이 높은 것부터 나열한다.
+           비율이 같으면 원래 순서를 유지한다(정렬이 안정적이라 그대로 남는다). */
+        savedReport.sort((a, b) => (b.count || 0) - (a.count || 0));
         /* [수정25] 여기서 자동으로 파일을 내려받지 않는다.
            그룹을 정리했을 뿐인데 파일이 생기면, 수정할 때마다 쓰지도 않을
            파일이 쌓인다. 저장은 사용자가 '재그룹 저장(JSON)'을 누를 때만 한다. */
@@ -3240,6 +3255,7 @@ ${JSON.stringify(issuesArr)}
     async function resetReGroup() {
         if (!await customConfirm("저장된 재그룹 자료를 지우고<br>초기화할까요?")) return;
         savedReport = null;
+        reportPhoto = null; reportPeople = 0;   // [수정27] 보고서 대상 정보도 함께 비운다
         document.getElementById("analyzeBtn").style.display = "inline-flex";
         document.getElementById("reportBtn").style.display = "none";
         document.getElementById("resetSimBtn").style.display = "none";
@@ -3255,6 +3271,15 @@ ${JSON.stringify(issuesArr)}
                 const loaded = JSON.parse(evt.target.result);
                 if (loaded.report && loaded.names) {
                     savedReport = loaded.report; analyzedNames = loaded.names;
+                    /* [수정28] 예전에 저장한 파일에는 count 가 없다.
+                       비율 문자열에서 숫자를 되살려 같은 기준으로 정렬한다. */
+                    savedReport.forEach((r) => {
+                        if (typeof r.count !== "number") {
+                            r.count = Array.isArray(r.rawItems) ? r.rawItems.length
+                                : String(r.content || "").split("<br>").filter(Boolean).length;
+                        }
+                    });
+                    savedReport.sort((a, b) => (b.count || 0) - (a.count || 0));
                     // [수정24] 불러온 보고서에도 대상 사진을 복원한다.
                     reportPhoto = loaded.photo || null; reportPeople = Number(loaded.people || 0);
                 }
@@ -3363,11 +3388,6 @@ ${JSON.stringify(issuesArr)}
     // 사진 이용 상태 — 기본값은 언제나 "both"(계속 수집 + 진단).
     // "quiz"(진단 전용 = 입력 마감)는 관리자가 명시적으로 선택했을 때만 적용된다.
     function usageOf(ak) { return (ak && ak.usage === "quiz") ? "quiz" : "both"; }
-    // [수정20] 표시용 구분(진단 중심 / 수집 중)일 뿐, 입력을 막는 데는 쓰지 않는다.
-    function isQuizOnly(photoImage) {
-        const ak = getAnswerKey(photoImage);
-        return !!ak && usageOf(ak) === "quiz";
-    }
     /* [수정15] 수준진단에서 편입된 입력인지 판별한다.
        진단 응시자의 위험요인도 자료로서 DB(inspections)에 남긴다. 다만
        그 입력이 곧바로 정답 세트의 '재료'가 되면, 관리자의 승격 판정을
@@ -3732,6 +3752,7 @@ ${JSON.stringify(issuesArr)}
        ========================================================= */
     const AK_VER_DOC = "_ak_rev";
     let _akRevSeen = "";
+    let _akFullPull = 0;               // [수정27] 변경표시 문서가 없을 때의 전체 재읽기 시각
 
     async function bumpAnswerKeyRev() {
         const rev = String(Date.now());
@@ -3763,7 +3784,16 @@ ${JSON.stringify(issuesArr)}
                 const j = await res.json();
                 rev = String(((j.fields || {}).rev || {}).stringValue || "");
             }
-            if (!rev) return false;               // 표시 문서가 아직 없으면 판단 보류
+            /* [수정27] 변경표시 문서가 아직 없는 경우(이 기능 도입 전에 만들어진
+               데이터, 또는 아직 아무도 정답 세트를 저장하지 않은 상태)에는
+               '변화 없음'으로 단정하면 폴링 중인 기기가 영영 갱신되지 않는다.
+               이때만 예외로, 30초에 한 번은 전체를 다시 읽어 확인한다. */
+            if (!rev) {
+                const now = Date.now();
+                if (now - _akFullPull < 30000) return false;
+                _akFullPull = now;
+                return true;
+            }
             if (rev === _akRevSeen) return false; // 변화 없음 — 여기서 끝(수십 바이트)
             _akRevSeen = rev;
             return true;
