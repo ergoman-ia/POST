@@ -663,6 +663,10 @@
                     <ul id="issueList" class="issue-list"></ul>
 
                     <div id="nameOrgWrap">
+                    <div id="quizNameHint" style="display:none; background:#f4f0ff; border:1px solid var(--admin); border-radius:10px; padding:9px 12px; margin-top:14px; font-size:.8rem; color:#4c1d95;">
+                        🧑‍💼 <b>이름과 소속을 입력해 주세요.</b> 진단 결과는 응시자별로 기록되며,
+                        여기서 찾으신 위험요인은 <b>정답 세트에 없던 새 지적</b>을 발굴하는 데 쓰입니다.
+                    </div>
                     <div style="margin-top:16px; padding-top:16px; border-top:1px dashed var(--line); display:flex; align-items:center; justify-content:space-between; gap:8px; flex-wrap:wrap;">
                         <span style="font-size:.82rem; color:var(--muted); font-weight:600;">🧑‍💼 이름·소속 기억</span>
                         <div class="seg" id="rememberSeg">
@@ -1964,9 +1968,11 @@
         const mainBtn = document.getElementById("submitMainBtn");
         if (appMode === "quiz") {
             if (mainBtn) mainBtn.textContent = "📊 채점하기";
-            const need = quizKey ? quizKey.items.filter((i) => i.core !== false).length : 0;
+            const need = quizKey ? coreItems(quizKey).length : 0;
+            const qn = (document.getElementById("userName").value || "").trim();
             document.getElementById("submitSummary").innerHTML =
-                `입력 <b>${issues.length}개</b>` + (need ? ` · 핵심 위험요인 <b>${need}개</b>를 목표로` : "");
+                `입력 <b>${issues.length}개</b>` + (need ? ` · 핵심 위험요인 <b>${need}개</b>를 목표로` : "")
+                + (qn ? ` · ${esc(qn)}` : ' · <span style="color:var(--danger)">이름을 입력하세요</span>');
             document.getElementById("submitBar").classList.add("show");
             return;
         }
@@ -3139,8 +3145,28 @@ ${JSON.stringify(issuesArr)}
     function personKey(it) {
         const n = String((it && it.name) || "").toLowerCase().replace(/[\s._\-()]/g, "");
         const o = String((it && it.org) || "").toLowerCase().replace(/[\s._\-()]/g, "");
-        if (!n) return "";                 // 이름 없음 → 익명. 서로 뭉치지 않도록 별도 처리
+        // [수정5] "익명"·"무명" 등은 이름이 아니다.
+        // 이걸 이름으로 인정하면 서로 다른 사람이 모두 "익명|" 이라는
+        // 같은 키를 갖게 되어 여러 명이 1명으로 합쳐진다.
+        if (!n || /^(익명|무명|anonymous|anon|미입력|없음)$/.test(n)) return "";
         return n + "|" + o;
+    }
+
+    /* [수정5] 이름을 받지 않는 수준진단용 식별자.
+       브라우저(기기)마다 1개를 만들어 localStorage 에 보관한다.
+       · 같은 사람이 PC와 폰으로 응시하면 2명으로 집계된다 (과대 계산)
+       · 같은 기기를 두 사람이 쓰면 1명으로 집계된다 (과소 계산)
+       이름을 받지 않는 이상 완벽할 수 없으므로, 정확도가 필요하면
+       진단 화면에서도 이름을 입력받도록 바꾸는 편이 낫다. */
+    const LS_DEVICE = "quiz_device_id";
+    function deviceId() {
+        let v = "";
+        try { v = localStorage.getItem(LS_DEVICE) || ""; } catch (_) { }
+        if (!v) {
+            v = "d" + Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
+            try { localStorage.setItem(LS_DEVICE, v); } catch (_) { }
+        }
+        return v;
     }
     function analystKeysOf(photoImage) {
         const set = new Set();
@@ -3246,7 +3272,7 @@ ${JSON.stringify(issuesArr)}
        ========================================================= */
     let quizResults = [];          // 관리자 화면에서 불러온 응시 기록
     let _qrLoaded = false;
-    const _quizAttempt = {};       // sig -> 이번 세션에서 정답을 본 횟수
+    const _quizAttempt = {};       // "사진서명|응시자키" -> 이번 세션 응시 횟수
 
     async function persistQuizResult(rec) {
         if (window.__authReady && window.fs && window.fs.db) {
@@ -3264,14 +3290,32 @@ ${JSON.stringify(issuesArr)}
     async function saveQuizResult(res, key, inputs) {
         try {
             const sig = key.sig || sigOf(currentPhoto);
-            const prev = _quizAttempt[sig] || 0;
-            const attempt = prev + 1;
-            _quizAttempt[sig] = attempt;
 
             const nameEl = document.getElementById("userName");
             const orgEl = document.getElementById("userOrg");
-            const name = (nameEl && nameEl.value.trim()) || "익명";
+            const rawName = (nameEl && nameEl.value.trim()) || "";
             const org = (orgEl && orgEl.value.trim()) || "";
+
+            /* [수정6] 응시자 식별은 이름+소속이 기준이다.
+               채점 전에 이름을 필수로 받으므로 정상 경로에서는 항상 값이 있다.
+               기기 ID는 구버전 기록이나 예외 상황을 위한 최후 보루로만 남긴다. */
+            const pk = personKey({ name: rawName, org });
+            const anon = !pk;
+            const pkey = pk || ("dev:" + deviceId());
+
+            /* 재응시 횟수 — localStorage 에 '사람 + 사진' 단위로 보관한다.
+               기존에는 메모리 변수(새로고침하면 리셋)였고 사진 단위여서,
+               한 기기를 여러 사람이 쓰면 뒷사람이 2회차로 잘못 기록됐다.
+               ※ 기기를 옮기면 이 값은 다시 0이지만, 승격 후보 집계는
+                  서버에서 '사람별 가장 이른 기록 1건'만 쓰므로 결과는 어긋나지 않는다. */
+            const seenKey = "quiz_seen_" + sig + "_" + pkey;
+            const memKey = sig + "|" + pkey;
+            let prev = 0;
+            try { prev = parseInt(localStorage.getItem(seenKey) || "0", 10) || 0; } catch (_) { }
+            prev = Math.max(prev, _quizAttempt[memKey] || 0);
+            const attempt = prev + 1;
+            _quizAttempt[memKey] = attempt;
+            try { localStorage.setItem(seenKey, String(attempt)); } catch (_) { }
 
             const titles = (arr) => (arr || []).map((x) => String((x && x.item ? x.item.title : x && x.title) || "")).filter(Boolean);
 
@@ -3279,8 +3323,10 @@ ${JSON.stringify(issuesArr)}
                 type: "quiz_result",
                 source: "quiz",
                 sig, photoId: key.photoId || "",
-                name, org,
-                pkey: personKey({ name, org }),
+                name: rawName || "익명",
+                org,
+                pkey,
+                anon,                              // 이름 없이 기기 ID로 식별된 응시인지
                 attempt,
                 // pristine = 이 사진의 정답을 아직 보지 않은 상태의 입력. 승격 집계는 이것만 사용.
                 pristine: attempt === 1,
@@ -3312,11 +3358,19 @@ ${JSON.stringify(issuesArr)}
                 .filter((d) => d && (d.type === "quiz_result" || d.source === "quiz"))
                 .map((d) => {
                     const j = (s) => { try { const v = JSON.parse(s || "[]"); return Array.isArray(v) ? v : []; } catch (_) { return []; } };
+                    const dbId = d._dbId || d.id || "";
+                    /* [수정5] 구버전 기록 복구.
+                       이전 코드는 이름이 없을 때 pkey 를 "익명|" 으로 저장해
+                       모든 응시자가 한 사람으로 뭉쳤다. 그런 기록은 식별 불가로 보고
+                       문서마다 별개의 응시자로 취급한다. */
+                    let pk = d.pkey || "";
+                    if (!pk || pk === "익명|" || /^익명\|/.test(pk)) pk = "rec:" + dbId;
                     return {
-                        dbId: d._dbId || d.id || "",
+                        dbId,
                         sig: d.sig || "", photoId: d.photoId || "",
                         name: d.name || "익명", org: d.org || "",
-                        pkey: d.pkey || personKey({ name: d.name, org: d.org }),
+                        pkey: pk,
+                        anon: !!d.anon,
                         attempt: Number(d.attempt || 1),
                         pristine: (d.pristine === undefined) ? (Number(d.attempt || 1) === 1) : !!d.pristine,
                         inputs: j(d.inputsJson), extras: j(d.extrasJson),
@@ -3839,7 +3893,10 @@ ${JSON.stringify(I)}
     }
     function enterQuiz() {
         appMode = "quiz";
-        if (!_akLoaded) loadAnswerKeys(true);
+        // [수정5] 정답 세트는 실시간 동기화(onSnapshot) 대상이 아니라 1회성 로드다.
+        // 기존에는 한 번 읽은 뒤 다시 읽지 않아, 다른 기기에서 방금 만든 정답 세트가
+        // 이 기기에서는 새로고침 전까지 보이지 않았다. 진단 진입 때마다 다시 읽는다.
+        loadAnswerKeys(true);
         showGalleryScreen();
     }
     function showGalleryScreen() {
@@ -3921,8 +3978,14 @@ ${JSON.stringify(I)}
         if (title) title.innerHTML = on
             ? '📝 내가 찾은 위험요인 <span style="color:var(--admin);">(모두 찾아 하나씩 추가)</span>'
             : '📝 내가 찾은 위험요인 <span style="color:red;">(하나씩 여러번 추가)</span>';
+        // [수정6] 진단할 때도 이름·소속을 받는다.
+        // 기존에는 진단 화면에서 이 영역을 숨겨 응시자를 식별할 수 없었고,
+        // 그 결과 서로 다른 사람의 응시가 한 명으로 집계됐다.
+        // 진단 입력도 '사람이 찾아낸 위험요인' 데이터로 DB에 쌓이므로 신원이 필요하다.
         const nameGrid = document.getElementById("nameOrgWrap");
-        if (nameGrid) nameGrid.style.display = on ? "none" : "block";
+        if (nameGrid) nameGrid.style.display = "block";
+        const nameHint = document.getElementById("quizNameHint");
+        if (nameHint) nameHint.style.display = on ? "block" : "none";
     }
 
     /* 등록/채점 버튼 분기 */
@@ -3934,6 +3997,16 @@ ${JSON.stringify(I)}
     async function submitQuiz() {
         if (submitQuiz._busy) return;
         if (!quizKey) { showToast("정답 세트가 없습니다"); return; }
+
+        // [수정6] 진단 기록도 응시자별로 DB에 남으므로 이름을 반드시 받는다.
+        const nameEl = document.getElementById("userName");
+        const quizName = (nameEl && nameEl.value.trim()) || "";
+        if (!quizName) {
+            showToast("이름을 입력해 주세요");
+            if (nameEl) { nameEl.focus(); nameEl.scrollIntoView({ behavior: "smooth", block: "center" }); }
+            return;
+        }
+
         const inputs = issues.map((p) => String(p.text || "").trim()).filter(Boolean);
         if (inputs.length === 0) { showToast("위험요인을 1개 이상 입력해 주세요"); return; }
 
@@ -4143,8 +4216,10 @@ ${JSON.stringify(I)}
         const rows = photoList.map((p) => {
             const sig = sigOf(p.image);
             const all = quizResults.filter((r) => r.sig === sig);
-            const first = new Set(all.filter((r) => r.pristine).map((r) => r.pkey || r.dbId));
-            return { p, sig, tries: all.length, people: first.size, cand: promotionCandidates(sig) };
+            const firstRows = all.filter((r) => r.pristine);
+            const first = new Set(firstRows.map((r) => r.pkey || r.dbId));
+            const named = new Set(firstRows.filter((r) => !r.anon && !/^(rec|dev):/.test(r.pkey)).map((r) => r.pkey));
+            return { p, sig, tries: all.length, people: first.size, named: named.size, cand: promotionCandidates(sig) };
         }).filter((r) => r.tries > 0);
 
         if (rows.length === 0) {
@@ -4174,6 +4249,7 @@ ${JSON.stringify(I)}
                 <td style="text-align:center;">
                     <b style="font-size:1.05rem;">${r.people}명</b>
                     <div style="color:var(--faint); font-size:.72rem;">응시 ${r.tries}회</div>
+                    <div style="color:var(--faint); font-size:.68rem;">이름 ${r.named} · 기기 ${r.people - r.named}</div>
                 </td>
                 <td>${body}${weakTxt}</td></tr>`;
         }).join("");
