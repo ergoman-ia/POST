@@ -739,7 +739,7 @@
                     <table>
                         <thead><tr>
                             <th style="width:70px;">사진</th>
-                            <th style="width:78px; text-align:center;">참여자</th>
+                            <th style="width:78px; text-align:center;" title="이 사진에 위험요인을 입력한 전체 인원입니다. 위험요인 찾기·수준진단 어느 쪽으로 참여했든 모두 포함합니다.">참여자</th>
                             <th>정답 세트</th>
                             <th style="width:230px;"></th>
                         </tr></thead>
@@ -753,8 +753,9 @@
                 <p class="section-sub">수준진단 응시자가 입력한 위험요인을 저장합니다.
                     그중 <b>정답 세트에 없던 지적</b>을 모아, 서로 다른 응시자 <b>2명 이상</b>이 같은 뜻으로 지적한 것을
                     <b>승격 후보</b>로 보여줍니다. 타당하다고 판단되면 정답 세트 편집에서 항목으로 추가하세요.<br>
-                    <span style="color:var(--muted);">※ 채점 결과는 놓친 정답의 내용을 보여주지 않으므로, 재응시도 집계에 포함합니다.
-                    같은 사람은 여러 번 응시해도 <b>1명</b>으로 셉니다.</span></p>
+                    <span style="color:var(--muted);">※ 응시자가 입력한 위험요인은 분석자 입력과 똑같이 저장되어, <b>↻ 다시 생성</b> 시 정답 세트의 재료가 됩니다.
+                    아래 승격 판정은 <b>재생성 없이 지금 바로</b> 정답에 넣거나(⭕) 앞으로도 재료에서 빼기 위한(❌) 것입니다.
+                    같은 사람은 여러 번 응시해도 1명으로 셉니다.</span></p>
                 <div class="toolbar">
                     <button class="btn btn-ghost btn-sm" onclick="App.refreshQuizResults()">🔄 진단 기록 불러오기</button>
                     <div class="spacer"></div>
@@ -2570,7 +2571,7 @@
                     <td style="text-align:center;"><input type="checkbox" class="row-check" data-id="${it.id}"></td>
                     <td>${new Date(it.timestamp).toLocaleString("ko-KR", { dateStyle: "short", timeStyle: "short" })}</td>
                     <td>${esc(it.name)}${isQuizEntry(it)
-                        ? ` <span style="display:inline-block; background:#f4f0ff; color:var(--admin); border:1px solid var(--admin); border-radius:6px; padding:1px 5px; font-size:.66rem; font-weight:700; vertical-align:middle;" title="수준진단 응시로 편입된 자료입니다. 정답 세트 생성 재료와 분석자 수에는 포함하지 않습니다.">진단</span>`
+                        ? ` <span style="display:inline-block; background:#f4f0ff; color:var(--admin); border:1px solid var(--admin); border-radius:6px; padding:1px 5px; font-size:.66rem; font-weight:700; vertical-align:middle;" title="수준진단 응시로 들어온 자료입니다. 정답 세트 생성에는 분석자 입력과 똑같이 쓰입니다.">진단</span>`
                         : ""}</td>
                     <td>${esc(it.org || "")}</td>
                     <td style="text-align:center;">
@@ -3153,19 +3154,19 @@ ${JSON.stringify(issuesArr)}
           한쪽만 빼면 임계치(coreMin)만 올라가 정상 항목이 탈락한다. */
     function isQuizEntry(it) { return !!it && it.from === "quiz"; }
 
-    // 정답 세트를 만든 '이후'에 들어온 입력 건수 (관리자 판단용)
-    // 진단 편입분은 정답 세트 재생성의 근거가 아니므로 세지 않는다.
+    /* 정답 세트를 만든 '이후'에 들어온 입력 건수 (관리자 판단용)
+       [수정19] 진단 응시로 들어온 입력도 재생성의 근거이므로 함께 센다. */
     function newSince(photoImage, ak) {
         if (!ak) return 0;
         const t = ak.builtAt || 0;
-        return entryList.filter((it) => it.photo === photoImage && !isQuizEntry(it) && (it.timestamp || 0) > t).length;
+        return entryList.filter((it) => it.photo === photoImage && (it.timestamp || 0) > t).length;
     }
     // 생성 이후 새로 입력한 사람 이름 (최대 몇 명만)
     function newNames(photoImage, ak, max) {
         if (!ak) return [];
         const t = ak.builtAt || 0;
         const names = entryList
-            .filter((it) => it.photo === photoImage && !isQuizEntry(it) && (it.timestamp || 0) > t)
+            .filter((it) => it.photo === photoImage && (it.timestamp || 0) > t)
             .map((it) => it.name || "익명");
         return [...new Set(names)].slice(0, max || 4);
     }
@@ -3231,19 +3232,21 @@ ${JSON.stringify(issuesArr)}
         }
         return v;
     }
+    /* [수정19] 재료와 분모는 반드시 같은 집합이어야 한다.
+       진단 입력을 재료에 넣기로 했으므로 인원 집계에도 함께 넣는다.
+       quiz 는 '그중 진단으로 들어온 인원'을 참고로 보여주기 위한 값일 뿐,
+       빼는 용도가 아니다. */
     function analystKeysOf(photoImage) {
         const set = new Set();
         const qset = new Set();
-        let anon = 0, qanon = 0;
+        let anon = 0;
         entryList.forEach((it) => {
             if (it.photo !== photoImage) return;
             const k = personKey(it);
-            // [수정15] 진단 편입분은 분석자 수(정답 세트의 분모)에 넣지 않고 따로 센다.
-            if (isQuizEntry(it)) { if (k) qset.add(k); else qanon++; return; }
-            if (k) set.add(k);
+            if (k) { set.add(k); if (isQuizEntry(it)) qset.add(k); }
             else anon++;                   // 익명(구버전 데이터)은 각 건을 1명으로 센다
         });
-        return { keys: set, anon, quiz: qset.size + qanon };
+        return { keys: set, anon, quiz: qset.size };
     }
     function analystsOf(photoImage) {
         const r = analystKeysOf(photoImage);
@@ -3251,16 +3254,8 @@ ${JSON.stringify(issuesArr)}
     }
     // [수정15] 진단을 통해 자료가 편입된 인원 수 (참고 표시용 · 임계치에는 쓰지 않는다)
     function quizAnalystsOf(photoImage) { return analystKeysOf(photoImage).quiz; }
-    /* [수정17] 화면에 보여줄 '총 참여 인원'.
-       analystsOf() 는 정답 세트 계산 전용이라 진단 편입분을 뺀다 — 재료와 분모가
-       같은 집합이어야 임계치(coreMin)가 왜곡되지 않기 때문이다.
-       하지만 사람에게 보여주는 참여 인원까지 빼면, 진단으로 자료가 늘었는데도
-       '위험요인 찾기' 화면의 참여자 수가 그대로여서 반영이 안 된 것처럼 보인다.
-       계산용 분모와 표시용 인원을 분리한다. */
-    function participantsOf(photoImage) {
-        const r = analystKeysOf(photoImage);
-        return r.keys.size + r.anon + r.quiz;
-    }
+    // [수정19] 표시용 참여 인원 = 계산용 분모와 동일하다(분리할 이유가 없어졌다).
+    function participantsOf(photoImage) { return analystsOf(photoImage); }
     function getAnswerKey(photoImage) { return answerKeys[sigOf(photoImage)] || null; }
     /* [수정8] 핵심 항목 집계에서도 '틀리다' 판정 항목을 뺀다.
        채점(gradeQuiz)은 gradableItems 로 이미 제외하는데 이 함수는 제외하지 않아,
@@ -3342,8 +3337,8 @@ ${JSON.stringify(issuesArr)}
        해결: 화면이 보이는 동안 주기적으로 상태를 점검해, 구독이 없거나 오래
              소식이 없으면 다시 구독하거나 최소한 최신본을 한 번 읽어 온다.
        ========================================================= */
-    const SYNC_CHECK_MS = 12000;   // 점검 주기
-    const SYNC_STALE_MS = 40000;   // 이 시간 넘게 소식 없으면 채널이 죽은 것으로 본다
+    const SYNC_CHECK_MS = 5000;    // 점검 주기
+    const SYNC_STALE_MS = 12000;   // 이 시간 넘게 소식 없으면 채널이 죽은 것으로 본다
     let _syncTimer = null;
 
     async function syncNow(reason) {
@@ -3542,15 +3537,13 @@ ${JSON.stringify(issuesArr)}
             };
             await persistQuizResult(rec);
 
-            /* [수정15] 진단 참여자의 위험요인을 분석 결과(inspections)에 남긴다.
-               ─ 자료 보존과 승격 판정을 분리한다 ─
-               · 여기 저장되는 것은 '자료'다. 승격 여부는 이 자료가 남는지와
-                 무관하며, 오직 정답 세트에 항목이 추가되는지에만 관여한다.
+            /* [수정15→19] 진단 참여자의 위험요인을 분석 결과(inspections)에 남긴다.
+               · 참여 경로가 '위험요인 찾기'든 '수준진단'이든 자료의 취급은 같다.
+                 저장되고, 공유되고, 정답 세트 재생성의 재료가 된다.
                · [수정16] 회차 제한 없이 저장한다. 1회차만 저장하면 같은 사람이
                  다시 응시할 때 아무것도 남지 않아 '저장이 안 된다'로 보인다.
-                 재응시 입력이 정답 세트를 오염시킬 걱정은 없다 — from:"quiz" 자료는
-                 애초에 정답 세트 재료와 분석자 수에서 제외되기 때문이다.
-                 대신 몇 회차 입력인지(quizAttempt)를 문서에 남겨 구분할 수 있게 한다. */
+                 [수정17]로 채점 결과가 놓친 정답을 감추므로 베껴 쓸 수도 없다.
+                 몇 회차 입력인지(quizAttempt)는 추적용으로 문서에 남긴다. */
             const photo = photoList.find((p) => sigOf(p.image) === sig);
             if (photo) {
                 try {
@@ -3874,11 +3867,14 @@ ${JSON.stringify(flat)}
     async function buildAnswerKey(photoImage, onStep) {
         const step = (typeof onStep === "function") ? onStep : function () { };
         step(0);
-        /* [수정15] 진단에서 편입된 입력(from:"quiz")은 재료에서 뺀다.
-           응시자의 지적이 정답 세트에 반영되는 유일한 통로는 '승격 승인'이다.
-           여기서 함께 통합해 버리면 관리자가 판정하기도 전에 정답이 늘어난다. */
-        const entries = entryList.filter((e) => e.photo === photoImage && !isQuizEntry(e));
-        if (entries.length === 0) throw new Error("이 사진에는 등록된 분석 결과가 없습니다\n(진단 응시 기록은 정답 세트의 재료가 아닙니다)");
+        /* [수정19] 분석자 입력과 진단 응시자 입력을 구분 없이 모두 재료로 쓴다.
+           이 앱의 목적은 한 사진에 많은 사람이 참여해 위험요인을 모으고 나누는 것이다.
+           참여 경로가 '위험요인 찾기'였는지 '수준진단'이었는지는 자료의 가치와 무관하다.
+           ※ 예전에 진단 입력을 뺐던 이유(정답을 본 뒤 베껴 쓴 입력이 정답을 다시
+              강화하는 순환 논증)는 [수정17]에서 사라졌다. 채점 결과가 놓친 정답의
+              내용을 더 이상 보여주지 않으므로, 응시자의 입력도 독립적인 관찰이다. */
+        const entries = entryList.filter((e) => e.photo === photoImage);
+        if (entries.length === 0) throw new Error("이 사진에는 등록된 분석 결과가 없습니다");
 
         // 원본 지적 1건 = { text, name, pkey } — pkey 로 '같은 사람'을 판별한다.
         const flat = [];
@@ -3895,6 +3891,21 @@ ${JSON.stringify(flat)}
                 });
             });
         });
+        /* [수정19] 관리자가 '❌ 틀리다'로 판정한 표현은 재료에서 뺀다.
+           모든 입력을 재료로 쓰기로 한 이상, 이 장치가 없으면 다시 생성할 때마다
+           이미 기각한 지적이 정답으로 되살아나 판정이 무의미해진다.
+           (정답을 늘릴지 줄일지에 대한 관리자의 판단은 계속 유효해야 한다) */
+        const rejected = rejectedCands(getAnswerKey(photoImage)).map(normText).filter(Boolean);
+        const dropped = [];
+        const kept = flat.filter((f) => {
+            const n = normText(f.text);
+            const bad = rejected.some((k) => k === n || dice(k, n) >= 0.62);
+            if (bad) dropped.push(f.text);
+            return !bad;
+        });
+        if (dropped.length) console.log("[점검앱] 기각 판정으로 제외한 지적:", dropped.length + "건");
+        flat.length = 0; kept.forEach((f) => flat.push(f));
+
         if (flat.length === 0) throw new Error("통합할 지적 사항이 없습니다");
 
         const total = analystsOf(photoImage);          // [수정1] 문서 수가 아닌 실제 인원
@@ -4178,6 +4189,8 @@ ${JSON.stringify(I)}
         // [수정14] 평소에는 실시간 구독(watchAnswerKeys)이 최신 상태를 유지한다.
         // 구독이 끊겼거나 아직 못 붙은 경우에만 보조로 한 번 읽는다.
         if (!_akUnsub || !_akLoaded) watchAnswerKeys();
+        // [수정18] 진단 시작 시점은 최신 정답이 가장 중요한 순간이다. 기다리지 않고 확인한다.
+        syncNow("진단 진입");
         showGalleryScreen();
     }
     function showGalleryScreen() {
@@ -4329,6 +4342,46 @@ ${JSON.stringify(I)}
         submitQuiz._busy = true;
         const btn = document.getElementById("submitMainBtn");
         if (btn) btn.disabled = true;
+
+        /* [수정18] 채점 직전에 정답 세트를 다시 확인한다.
+           quizKey 는 '사진을 고른 순간'의 사본이다. 응시자가 입력하는 동안
+           관리자가 항목을 고치거나 세트를 지우면, 예전 정답으로 채점되어
+           이미 삭제된 항목을 '놓쳤다'고 하거나 없는 기준으로 점수가 나온다.
+           채점은 언제나 '제출 시점의 정답'으로 해야 한다. */
+        try {
+            busyShow("🔎 정답 세트 확인", ["최신본 확인"]);
+            const latest = await fetchAnswerKeyFresh(currentPhoto);
+            busyHide();
+            if (!latest) {
+                // 세트가 사라졌다 → 채점은 못 하지만 입력한 자료는 반드시 남긴다.
+                busyShow("💾 입력 자료 저장", ["서버에 저장"]);
+                try {
+                    const orgEl0 = document.getElementById("userOrg");
+                    await registerQuizAnalysts(currentPhoto, [{
+                        name: quizName, org: (orgEl0 && orgEl0.value.trim()) || "", inputs, attempt: 0, pristine: false
+                    }]);
+                } catch (e0) { console.warn("자료 저장 실패:", e0); }
+                busyHide();
+                submitQuiz._busy = false;
+                if (btn) btn.disabled = false;
+                await customConfirm(
+                    `관리자가 이 사진의 <b>정답 세트를 삭제</b>해 채점할 수 없습니다.
+                     <br><span style="color:var(--muted);font-size:.85rem;">
+                     입력하신 위험요인 ${inputs.length}건은 자료로 저장했습니다.</span>`);
+                return;
+            }
+            const changed = (latest.builtAt || 0) !== (quizKey.builtAt || 0)
+                || (latest.items || []).length !== (quizKey.items || []).length;
+            if (changed) {
+                quizKey = latest;
+                applyQuizChrome(true);
+                showToast("🔄 정답 세트가 방금 갱신되어 최신본으로 채점합니다");
+            }
+        } catch (e) {
+            busyHide();
+            console.warn("정답 세트 재확인 실패 — 갖고 있던 사본으로 채점합니다:", e);
+        }
+
         busyShow(`📊 채점 중 · 내 입력 ${inputs.length}개`, GRADE_STEPS);
         try {
             const res = await gradeQuiz(inputs, quizKey, busyStep);
@@ -4512,7 +4565,7 @@ ${JSON.stringify(I)}
             return `<tr class="${r.pending ? "ak-pending" : ""}">
                 <td><img class="thumb-img" src="${r.p.image}" alt=""></td>
                 <td style="text-align:center; font-weight:800; color:${ready ? "var(--success)" : "var(--faint)"}">${r.cnt}명
-                    ${r.qcnt ? `<div style="font-weight:600; color:var(--admin); font-size:.7rem; margin-top:2px;" title="진단 응시로 자료가 편입된 인원입니다. 자료는 남지만 정답 세트의 재료·임계치에는 넣지 않습니다.">+진단 ${r.qcnt}명</div>` : ""}</td>
+                    ${r.qcnt ? `<div style="font-weight:600; color:var(--admin); font-size:.7rem; margin-top:2px;" title="그중 수준진단으로 참여한 인원입니다. 정답 세트 재료에는 분석자 입력과 똑같이 포함됩니다.">그중 진단 ${r.qcnt}명</div>` : ""}</td>
                 <td>${akTxt}</td>
                 <td style="white-space:nowrap;">
                     <button class="btn ${r.fresh > 0 ? "btn-admin" : "btn-success"} btn-sm" ${ready ? "" : "disabled"}
@@ -4552,12 +4605,15 @@ ${JSON.stringify(I)}
                대상(1회차)은 따로 표시한다. */
             const people = new Set(all.map((r) => r.pkey || r.dbId));
             const named = new Set(all.filter((r) => !r.anon && !/^(rec|dev):/.test(r.pkey)).map((r) => r.pkey));
+            /* [수정19] '응시 N회'(제출 문서 수)는 표시하지 않는다.
+               여러 사람의 재응시가 한 숫자로 합쳐져 아무 것도 알려주지 않는다.
+               집계·판정은 전부 '사람 수' 기준이므로 사람 수만 보여준다. */
             return {
-                p, sig, tries: all.length,
+                p, sig,
                 people: people.size, named: named.size,
                 cand: promotionCandidates(sig)
             };
-        }).filter((r) => r.tries > 0);
+        }).filter((r) => r.people > 0);
 
         if (rows.length === 0) {
             tb.innerHTML = `<tr><td colspan="4"><div class="empty-state">
@@ -4565,7 +4621,7 @@ ${JSON.stringify(I)}
             return;
         }
         rows.sort((a, b) => (b.cand.filter((c) => c.support >= 2).length - a.cand.filter((c) => c.support >= 2).length)
-            || (b.tries - a.tries));
+            || (b.people - a.people));
 
         tb.innerHTML = rows.map((r) => {
             const strong = r.cand.filter((c) => c.support >= 2);
@@ -4585,7 +4641,7 @@ ${JSON.stringify(I)}
                 <td><img class="thumb-img" src="${r.p.image}" alt=""></td>
                 <td style="text-align:center;">
                     <b style="font-size:1.05rem;">${r.people}명</b>
-                    <div style="color:var(--faint); font-size:.72rem;">응시 ${r.tries}회</div>
+                    <div style="color:var(--faint); font-size:.72rem;">응시자</div>
                     ${(r.people - r.named) > 0
                         ? `<div style="color:var(--warn); font-size:.68rem;" title="이름으로 식별되지 않은 응시입니다. 한 기기를 여러 사람이 쓰면 여러 명이 1명으로 뭉쳐 실제보다 적게 셉니다.">⚠ 식별 불가 ${r.people - r.named}명</div>`
                         : ""}
@@ -4703,7 +4759,8 @@ ${JSON.stringify(I)}
             const ok = await customConfirm("기존 정답 세트를 <b>덮어씁니다</b>.<br>편집한 내용도 사라집니다. 계속할까요?");
             if (!ok) return;
         }
-        busyShow(`🎯 정답 세트 생성 · 분석자 ${cnt}명`, AK_STEPS);
+        const qc = quizAnalystsOf(p.image);
+        busyShow(`🎯 정답 세트 생성 · 참여자 ${cnt}명` + (qc ? ` (진단 ${qc}명 포함)` : ""), AK_STEPS);
         try {
             const ak = await buildAnswerKey(p.image, busyStep);
             busyStep(4);
@@ -4893,12 +4950,12 @@ ${JSON.stringify(I)}
         no.className = "btn btn-sm mn-no " + (next === "no" ? "btn-danger" : "btn-ghost");
     }
 
-    /* [수정7→15] 응시자의 입력을 inspections 에 남긴다.
-       · 이제 채점 직후(saveQuizResult)에 1회차 응시자 전원이 이 경로로 저장된다.
+    /* [수정7→19] 응시자의 입력을 inspections 에 남긴다.
+       · 채점 직후(saveQuizResult)에 응시자 전원이 이 경로로 저장된다.
          승격 승인 시점에도 한 번 더 호출되지만, 이미 있는 내용은 병합만 되므로
          구버전 기록(이름 없이 쌓인 것)을 뒤늦게 편입하는 역할만 한다.
-       · 저장되는 문서는 항상 from:"quiz" 다. 자료로는 남지만 정답 세트의
-         재료와 분석자 수에는 들어가지 않는다. 정답을 늘리는 것은 승격 판정뿐이다. */
+       · 저장 문서에는 from:"quiz" 가 붙는다. 참여 경로 표시일 뿐이며,
+         재료·인원 집계에서 분석자 입력과 동등하게 쓰인다. */
     async function registerQuizAnalysts(photoImage, people, text) {
         let added = 0, merged = 0;
         const failed = [], written = [];
