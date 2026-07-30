@@ -753,9 +753,12 @@
                 <p class="section-sub">수준진단 응시자가 입력한 위험요인을 저장합니다.
                     그중 <b>정답 세트에 없던 지적</b>을 모아, 서로 다른 응시자 <b>2명 이상</b>이 같은 뜻으로 지적한 것을
                     <b>승격 후보</b>로 보여줍니다. 타당하다고 판단되면 정답 세트 편집에서 항목으로 추가하세요.<br>
-                    <span style="color:var(--warn);">※ 정답을 본 뒤의 재응시(2회차 이상)는 집계에서 제외합니다.</span></p>
+                    <span style="color:var(--warn);">※ 정답을 본 뒤의 재응시(2회차 이상)는 <b>승격 집계</b>에서만 제외합니다.
+                    입력한 위험요인 자체는 회차와 관계없이 분석 결과에 저장됩니다.</span></p>
                 <div class="toolbar">
                     <button class="btn btn-ghost btn-sm" onclick="App.refreshQuizResults()">🔄 진단 기록 불러오기</button>
+                    <button class="btn btn-ghost btn-sm" onclick="App.resetQuizAttempts()"
+                        title="이 기기에 저장된 '몇 회차 응시인지' 기록만 지웁니다. 서버의 응시 기록·자료는 그대로입니다.">🔁 이 기기 응시 회차 초기화</button>
                     <div class="spacer"></div>
                     <button class="btn btn-ghost btn-sm" onclick="App.exportQuizResults()">⬇️ 응시 기록 내려받기(JSON)</button>
                 </div>
@@ -990,6 +993,8 @@
 
         // 백그라운드 복귀 시 재연결 핸들러 등록
         wireVisibilityRecovery();
+        // [수정16] 실시간 채널이 조용히 끊겨도 화면이 멈추지 않도록 주기 점검 시작
+        startSyncWatchdog();
         // 인증(익명 로그인)이 늦게 끝나는 경우 데이터 재로드 핸들러 등록
         wireAuthReload();
     });
@@ -3264,6 +3269,7 @@ ${JSON.stringify(issuesArr)}
        그 사이 '생성하세요'로 보여서 같은 정답 세트를 또 만드는 일이 생겼다. */
     let _akUnsub = null;
     let _akFresh = false;              // 서버에서 최신본을 받았는지
+    let _akLastSnap = 0;               // [수정16] 정답 세트 최신본이 도착한 시각(워치독 판단용)
     const LS_AK_CACHE = "ak_cache_v1";
 
     /* [수정15] 정답 세트 로컬 캐시.
@@ -3291,8 +3297,12 @@ ${JSON.stringify(issuesArr)}
 
     function watchAnswerKeys() {
         hydrateAnswerKeys();           // 캐시가 있으면 즉시 화면부터 채운다
-        if (!fsReady()) { loadAnswerKeys(true); return; }
+        /* [수정16] 폴백으로 빠질 때는 _akUnsub 를 반드시 비운다.
+           예전 구독 핸들이 남아 있으면 워치독이 '구독이 살아 있다'고 오판해
+           죽은 채널을 영원히 되살리지 않는다. */
+        if (!fsReady()) { _akUnsub = null; loadAnswerKeys(true); return; }
         try { if (_akUnsub) _akUnsub(); } catch (_) { }
+        _akUnsub = null;
         const { db, collection, onSnapshot } = window.fs;
         try {
             _akUnsub = onSnapshot(collection(db, AK_COLL), (snap) => {
@@ -3300,14 +3310,59 @@ ${JSON.stringify(issuesArr)}
                 applyAnswerKeyDocs(docs);
             }, (err) => {
                 console.warn("정답세트 실시간 동기화 오류 → 1회 읽기로 대체:", err);
+                _akUnsub = null;
                 loadAnswerKeys(true);
             });
         } catch (e) {
             console.warn("정답세트 구독 실패 → 1회 읽기로 대체:", e);
+            _akUnsub = null;
             loadAnswerKeys(true);
         }
         // 실시간 구독이 막히는 환경 대비 안전망
         setTimeout(() => { if (!_akFresh) loadAnswerKeys(true); }, 2500);
+    }
+
+    /* =========================================================
+       [수정16] 실시간 반영 워치독
+       ---------------------------------------------------------
+       왜 필요한가: 실시간 구독(onSnapshot)은 장시간 유지되는 스트리밍 채널을
+       쓰는데, 모바일에서는 이 채널이 조용히 끊기는 일이 흔하다.
+         · Wi-Fi ↔ LTE 전환, 통신사 프록시, 절전 모드
+         · 브라우저가 스트리밍 자체를 막는 경우(구독이 아예 안 걸린다)
+       기존 코드는 이때 '1회 읽기'로 한 번만 대체하고 끝났다. 그래서 화면이
+       그 시점에 멈춘 채 새로고침 전까지 영영 갱신되지 않았다.
+       해결: 화면이 보이는 동안 주기적으로 상태를 점검해, 구독이 없거나 오래
+             소식이 없으면 다시 구독하거나 최소한 최신본을 한 번 읽어 온다.
+       ========================================================= */
+    const SYNC_CHECK_MS = 12000;   // 점검 주기
+    const SYNC_STALE_MS = 40000;   // 이 시간 넘게 소식 없으면 채널이 죽은 것으로 본다
+    let _syncTimer = null;
+
+    async function syncNow(reason) {
+        if (!navigator.onLine) return;
+        console.log("[점검앱] 동기화 점검:", reason);
+        try {
+            if (fsReady() && !_akUnsub) watchAnswerKeys();   // 구독 자체를 되살린다
+            else await loadAnswerKeys(true);                 // 최소한 최신본은 가져온다
+        } catch (e) { console.warn("정답세트 동기화 실패:", e); }
+        try {
+            if (fsReady() && !_dataUnsub) watchData();
+            else await restLoadData();
+        } catch (e) { console.warn("점검기록 동기화 실패:", e); }
+    }
+
+    function startSyncWatchdog() {
+        if (_syncTimer) return;
+        _syncTimer = setInterval(() => {
+            if (document.visibilityState !== "visible") return;
+            const now = Date.now();
+            const akStale = !_akUnsub || (now - _akLastSnap) > SYNC_STALE_MS;
+            const dataStale = !_dataUnsub || (now - _lastDataSync) > SYNC_STALE_MS;
+            if (akStale || dataStale) syncNow("워치독");
+        }, SYNC_CHECK_MS);
+
+        // 네트워크가 돌아온 순간은 채널이 죽어 있을 확률이 가장 높다.
+        window.addEventListener("online", () => syncNow("online"));
     }
 
     function applyAnswerKeyDocs(docs) {
@@ -3336,6 +3391,7 @@ ${JSON.stringify(issuesArr)}
             answerKeys = map;
             _akLoaded = true;
             _akFresh = true;
+            _akLastSnap = Date.now();      // [수정16]
             cacheAnswerKeys();
             renderAnswerKeyPanel();
             if (appMode === "quiz") renderUserGallery();
@@ -4460,10 +4516,18 @@ ${JSON.stringify(I)}
         const rows = photoList.map((p) => {
             const sig = sigOf(p.image);
             const all = quizResults.filter((r) => r.sig === sig);
-            const firstRows = all.filter((r) => r.pristine);
-            const first = new Set(firstRows.map((r) => r.pkey || r.dbId));
-            const named = new Set(firstRows.filter((r) => !r.anon && !/^(rec|dev):/.test(r.pkey)).map((r) => r.pkey));
-            return { p, sig, tries: all.length, people: first.size, named: named.size, cand: promotionCandidates(sig) };
+            /* [수정16] 예전에는 1회차(pristine) 기록만 세었다. 그래서 같은 사람이
+               두 번째부터 응시하면 '응시 3회 · 0명 · 이름 0'처럼 사람이 0으로 찍혀
+               저장이 안 된 것처럼 보였다. 인원은 전체 기록으로 세고, 승격 집계
+               대상(1회차)은 따로 표시한다. */
+            const people = new Set(all.map((r) => r.pkey || r.dbId));
+            const firstPeople = new Set(all.filter((r) => r.pristine).map((r) => r.pkey || r.dbId));
+            const named = new Set(all.filter((r) => !r.anon && !/^(rec|dev):/.test(r.pkey)).map((r) => r.pkey));
+            return {
+                p, sig, tries: all.length,
+                people: people.size, first: firstPeople.size, named: named.size,
+                cand: promotionCandidates(sig)
+            };
         }).filter((r) => r.tries > 0);
 
         if (rows.length === 0) {
@@ -4493,7 +4557,10 @@ ${JSON.stringify(I)}
                 <td style="text-align:center;">
                     <b style="font-size:1.05rem;">${r.people}명</b>
                     <div style="color:var(--faint); font-size:.72rem;">응시 ${r.tries}회</div>
-                    <div style="color:var(--faint); font-size:.68rem;">이름 ${r.named} · 기기 ${r.people - r.named}</div>
+                    <div style="color:${r.first ? "var(--faint)" : "var(--warn)"}; font-size:.68rem;">승격 집계 대상(1회차) ${r.first}명</div>
+                    ${(r.people - r.named) > 0
+                        ? `<div style="color:var(--warn); font-size:.68rem;" title="이름으로 식별되지 않은 응시입니다. 한 기기를 여러 사람이 쓰면 여러 명이 1명으로 뭉쳐 실제보다 적게 셉니다.">⚠ 식별 불가 ${r.people - r.named}명</div>`
+                        : ""}
                 </td>
                 <td>${body}${weakTxt}</td>
                 <td style="white-space:nowrap;">
@@ -4548,6 +4615,31 @@ ${JSON.stringify(I)}
             busyHide();
             showToast("❌ 삭제 실패: " + (e.message || e));
         }
+    }
+
+    /* [수정16] 이 기기에 쌓인 '응시 회차' 기록을 지운다.
+       회차는 localStorage 에 사람+사진 단위로 누적되고, 2회차부터는 pristine=false 라
+       승격 후보 집계에서 빠진다. 테스트를 반복하면 후보가 하나도 안 잡히는데
+       원인이 화면에 드러나지 않아 '저장이 안 된다'로 보인다.
+       ※ 지우는 것은 이 기기의 회차 카운터뿐이다. 서버의 응시 기록과
+          분석 결과 자료는 건드리지 않는다. */
+    async function resetQuizAttempts() {
+        if (!await customConfirm(
+            `이 기기에 저장된 <b>응시 회차 기록</b>을 초기화할까요?
+             <br><span style="color:var(--muted);font-size:.8rem;">
+             다음 응시부터 다시 '1회차'로 기록되어 승격 후보 집계에 포함됩니다.
+             서버의 응시 기록과 저장된 위험요인 자료는 그대로 남습니다.</span>`)) return;
+        let n = 0;
+        try {
+            const del = [];
+            for (let i = 0; i < localStorage.length; i++) {
+                const k = localStorage.key(i);
+                if (k && k.indexOf("quiz_seen_") === 0) del.push(k);
+            }
+            del.forEach((k) => { localStorage.removeItem(k); n++; });
+        } catch (e) { console.warn("회차 초기화 실패:", e); }
+        for (const k in _quizAttempt) delete _quizAttempt[k];
+        showToast(`🔁 응시 회차 기록 ${n}건을 초기화했습니다`);
     }
 
     async function refreshQuizResults() {
@@ -5355,7 +5447,7 @@ ${JSON.stringify(I)}
         akToggleCore, akDelItem, akAddItem, akMerge, akSave, closeAkModal,
         akToggleUsage, saveAsAnswerKey, akShowEntries,
         /* --- [수정3] 수준진단 유입 --- */
-        refreshQuizResults, exportQuizResults, clearQuizResults,
+        refreshQuizResults, resetQuizAttempts, exportQuizResults, clearQuizResults,
         /* --- [수정4] 소수의견 전문가 판정 --- */
         openMinorityModal, setVerdict, setCandVerdict, saveMinorityVerdicts, closeMinorityModal
     };
