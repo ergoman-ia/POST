@@ -3476,21 +3476,31 @@ ${JSON.stringify(issuesArr)}
             };
             await persistQuizResult(rec);
 
-            /* [수정15] 진단 참여자의 위험요인도 분석 결과(inspections)에 남긴다.
+            /* [수정15] 진단 참여자의 위험요인을 분석 결과(inspections)에 남긴다.
                ─ 자료 보존과 승격 판정을 분리한다 ─
                · 여기 저장되는 것은 '자료'다. 승격 여부는 이 자료가 남는지와
                  무관하며, 오직 정답 세트에 항목이 추가되는지에만 관여한다.
-               · 1회차(pristine)만 저장한다. 채점 화면은 놓친 정답을 전부
-                 보여주므로, 2회차 이후 입력은 본인이 찾아낸 것으로 볼 수 없다.
-                 (그 기록은 quiz_results 에 그대로 남는다)
-               · from:"quiz" 로 표시되어 정답 세트 재료와 분석자 수에서는 빠진다. */
-            if (rec.pristine && !anon) {
-                const photo = photoList.find((p) => sigOf(p.image) === sig);
-                if (photo) {
-                    try {
-                        await registerQuizAnalysts(photo.image, [{ name: rawName, org, pkey, inputs }]);
-                    } catch (e2) { console.warn("진단 입력의 분석 결과 편입 실패:", e2); }
-                }
+               · [수정16] 회차 제한 없이 저장한다. 1회차만 저장하면 같은 사람이
+                 다시 응시할 때 아무것도 남지 않아 '저장이 안 된다'로 보인다.
+                 재응시 입력이 정답 세트를 오염시킬 걱정은 없다 — from:"quiz" 자료는
+                 애초에 정답 세트 재료와 분석자 수에서 제외되기 때문이다.
+                 대신 몇 회차 입력인지(quizAttempt)를 문서에 남겨 구분할 수 있게 한다. */
+            const photo = photoList.find((p) => sigOf(p.image) === sig);
+            if (photo) {
+                try {
+                    const r = await registerQuizAnalysts(photo.image, [{
+                        name: rawName, org, pkey, inputs, attempt, pristine: rec.pristine
+                    }]);
+                    /* 실시간 리스너(onSnapshot)가 막힌 환경에서는 방금 쓴 문서가
+                       화면 목록에 영영 안 들어온다. 로컬 목록에 즉시 반영한다. */
+                    (r.written || []).forEach((w) => {
+                        entryList = entryList.filter((x) => x.dbId !== w.dbId);
+                        entryList.push(w);
+                    });
+                    entryList.sort((a, b) => (b.timestamp || 0) - (a.timestamp || 0));
+                    if (r.added || r.merged) showToast("📌 입력한 위험요인을 자료로 저장했습니다");
+                    else if ((r.failed || []).length) showToast("⚠️ 자료 저장 실패: " + r.failed[0]);
+                } catch (e2) { console.warn("진단 입력의 분석 결과 편입 실패:", e2); }
             }
         } catch (e) {
             console.warn("진단 결과 저장 실패(무시하고 진행):", e);
@@ -4835,7 +4845,12 @@ ${JSON.stringify(I)}
                     issues: pins.map((x) => x.text),
                     pins,
                     photo: photoImage,
-                    from: "quiz"                    // 진단에서 편입된 기록임을 표시
+                    from: "quiz",                   // 진단에서 편입된 기록임을 표시
+                    // [수정16] 몇 회차 응시에서 들어온 내용인지. 1이면 정답을 보기 전 입력.
+                    quizAttempt: Number(p.attempt || 0),
+                    // 이 문서에 '정답을 보기 전(1회차)' 입력이 섞여 있는지. 한 번 참이면 계속 참.
+                    quizPristine: !!(keeper && keeper.quizPristine)
+                        || ((p.pristine === undefined) ? (Number(p.attempt || 1) === 1) : !!p.pristine)
                 };
                 const dbId = await persistEntry(entry, keeper ? keeper.dbId : null);
                 written.push({ dbId, ...entry });
