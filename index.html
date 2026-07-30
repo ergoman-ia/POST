@@ -3519,6 +3519,8 @@ ${JSON.stringify(issuesArr)}
     let _akFresh = false;              // 서버에서 최신본을 받았는지
     let _akLastSnap = 0;               // 정답 세트 최신본이 도착한 시각
     let _akLive = false;               // [수정22] 실시간 구독이 서버에 붙어 있는지
+    let _akLastVerify = 0;             // [수정30] 마지막으로 '서버에 직접 물어본' 시각
+    const AK_VERIFY_MS = 15000;        // [수정30] 구독이 살아 보여도 이 간격으로는 확인한다
     const LS_AK_CACHE = "ak_cache_v1";
 
     /* [수정15] 정답 세트 로컬 캐시.
@@ -3528,6 +3530,10 @@ ${JSON.stringify(issuesArr)}
        ※ 캐시가 낡아 '없음'으로 보이더라도, 실제 생성 직전에는 항상
           fetchAnswerKeyFresh() 로 서버를 다시 보므로 중복 생성은 막힌다. */
     function hydrateAnswerKeys() {
+        /* [수정30] 이미 서버 최신본을 들고 있으면 캐시로 되돌리지 않는다.
+           watchAnswerKeys 는 재구독 때마다 불리는데, 그때마다 낡은 캐시를
+           최신 데이터 위에 덮어쓰고 있었다. */
+        if (_akFresh) return true;
         try {
             const raw = localStorage.getItem(LS_AK_CACHE);
             if (!raw) return false;
@@ -3617,9 +3623,22 @@ ${JSON.stringify(issuesArr)}
         const force = !!(opts && opts.force);
         try {
             if (fsReady() && !_akUnsub) watchAnswerKeys();          // 구독 자체를 되살린다
-            else if (force || await answerKeyChanged()) {
-                console.log("[점검앱] 정답 세트 갱신 감지:", reason);
-                await loadAnswerKeys(true);
+            else {
+                const chk = await answerKeyChanged();
+                _akLastVerify = Date.now();                        // [수정30] 서버에 직접 물어본 시각
+                if (force || chk.changed) {
+                    console.log("[점검앱] 정답 세트 갱신 감지:", reason);
+                    const ok = await loadAnswerKeys(true);
+                    // [수정30] 읽기에 성공했을 때만 '여기까지 반영했다'고 기록한다
+                    if (ok && chk.rev) _akRevSeen = chk.rev;
+                    /* [수정30] 구독이 살아 있다고 표시돼 있는데 변경을 놓쳤다면,
+                       그 스트림은 조용히 끊긴 것이다(스냅샷도 오류도 오지 않는다).
+                       표시를 믿지 말고 실제로 다시 붙인다. */
+                    if (chk.changed && _akUnsub && _akLive) {
+                        _akLive = false;
+                        watchAnswerKeys();
+                    }
+                }
             }
             _syncFails = 0;                                        // 한 번이라도 닿으면 정상
             noticeConnectionBack();
@@ -3668,7 +3687,15 @@ ${JSON.stringify(issuesArr)}
         _syncTimer = setInterval(() => {
             if (document.visibilityState !== "visible") return;
             // [수정22] 구독이 서버에 붙어 있으면 폴링하지 않는다. 침묵은 정상이다.
-            if (!_akUnsub || !_akLive) syncNow("주기 확인");
+            if (!_akUnsub || !_akLive) { syncNow("주기 확인"); return; }
+            /* [수정30] 다만 _akLive 를 무한정 믿으면 안 된다.
+               스트림이 조용히 끊기면 스냅샷도 오류 콜백도 오지 않아,
+               _akLive 는 마지막 성공값 true 에 영원히 고정된다.
+               그러면 워치독이 "구독 정상"으로 오판해 폴링을 아예 하지 않고,
+               SDK 가 스스로 재연결할 때까지 화면이 옛 정답에 머문다.
+               그래서 15초에 한 번은 수십 바이트짜리 변경표시 문서 하나만
+               읽어 실제로 최신인지 확인한다. */
+            if (Date.now() - _akLastVerify > AK_VERIFY_MS) syncNow("주기 검증");
         }, SYNC_CHECK_MS);
 
         // 네트워크가 돌아온 순간은 채널이 죽어 있을 확률이 가장 높다.
@@ -3685,42 +3712,74 @@ ${JSON.stringify(issuesArr)}
             const now = Date.now();
             if (now - _lastTouchSync < SYNC_CHECK_MS) return;
             _lastTouchSync = now;
-            if (!_akUnsub || !_akLive) syncNow("사용자 조작");
+            if (!_akUnsub || !_akLive || (now - _akLastVerify > AK_VERIFY_MS)) syncNow("사용자 조작");
         };
         window.addEventListener("pointerdown", onTouch, { passive: true });
     }
 
+    /* [수정30] 문서 1건 → 정답 세트 객체.
+       전체 적용과 단건 적용이 '같은 파서'를 쓰게 해서, 단건 경로에서
+       coreMin·needsReview 같은 필드가 조용히 누락되는 일을 없앤다. */
+    function parseAnswerKeyDoc(d) {
+        const id = (d && (d._dbId || d.id)) || "";
+        if (id === AK_VER_DOC) { const rv = String(d.rev || ""); if (rv) _akRevSeen = rv; return null; }
+        if (String(id).indexOf(AK_PREFIX) !== 0) return null;
+        let items = [];
+        try { items = JSON.parse(d.itemsJson || "[]"); } catch (_) { items = []; }
+        if (!Array.isArray(items)) items = [];
+        const sig = d.sig || String(id).slice(AK_PREFIX.length);
+        return {
+            sig, docId: id,
+            photoId: d.photoId || "",
+            analystCount: Number(d.analystCount || 0),
+            coreMin: Number(d.coreMin || 0),
+            orphanCount: Number(d.orphanCount || 0),
+            droppedCount: Number(d.droppedCount || 0),
+            needsReview: !!d.needsReview,
+            builtAt: Number(d.builtAt || 0),
+            usage: (d.usage === "quiz") ? "quiz" : "both",
+            rejectedCands: (() => { try { const v = JSON.parse(d.rejectedCandsJson || "[]"); return Array.isArray(v) ? v : []; } catch (_) { return []; } })(),
+            items
+        };
+    }
+
+    function repaintAnswerKeyViews() {
+        cacheAnswerKeys();
+        renderAnswerKeyPanel();
+        if (appMode === "quiz") renderUserGallery();
+    }
+
     function applyAnswerKeyDocs(docs) {
-            const map = {};
-            (docs || []).forEach((d) => {
-                const id = d._dbId || d.id || "";
-                if (id === AK_VER_DOC) { const rv = String(d.rev || ""); if (rv) _akRevSeen = rv; return; }
-                if (String(id).indexOf(AK_PREFIX) !== 0) return;
-                let items = [];
-                try { items = JSON.parse(d.itemsJson || "[]"); } catch (_) { items = []; }
-                if (!Array.isArray(items)) items = [];
-                const sig = d.sig || String(id).slice(AK_PREFIX.length);
-                map[sig] = {
-                    sig, docId: id,
-                    photoId: d.photoId || "",
-                    analystCount: Number(d.analystCount || 0),
-                    coreMin: Number(d.coreMin || 0),
-                    orphanCount: Number(d.orphanCount || 0),
-                    droppedCount: Number(d.droppedCount || 0),
-                    needsReview: !!d.needsReview,
-                    builtAt: Number(d.builtAt || 0),
-                    usage: (d.usage === "quiz") ? "quiz" : "both",
-                    rejectedCands: (() => { try { const v = JSON.parse(d.rejectedCandsJson || "[]"); return Array.isArray(v) ? v : []; } catch (_) { return []; } })(),
-                    items
-                };
-            });
-            answerKeys = map;
-            _akLoaded = true;
-            _akFresh = true;
-            _akLastSnap = Date.now();      // [수정16]
-            cacheAnswerKeys();
-            renderAnswerKeyPanel();
-            if (appMode === "quiz") renderUserGallery();
+        const map = {};
+        (docs || []).forEach((d) => {
+            const ak = parseAnswerKeyDoc(d);
+            if (ak) map[ak.sig] = ak;
+        });
+        answerKeys = map;
+        _akLoaded = true;
+        _akFresh = true;
+        _akLastSnap = Date.now();      // [수정16]
+        _akLastVerify = Date.now();    // [수정30] 서버와 방금 닿았다
+        repaintAnswerKeyViews();
+    }
+
+    /* [수정30] 서버에서 읽은 '문서 하나'만 제자리에 갈아끼운다.
+       나머지 사진의 정답 세트는 손대지 않는다. */
+    function upsertAnswerKeyDoc(d) {
+        const ak = parseAnswerKeyDoc(d);
+        if (!ak) return null;
+        answerKeys[ak.sig] = ak;
+        _akLoaded = true;
+        _akLastVerify = Date.now();
+        repaintAnswerKeyViews();
+        return ak;
+    }
+
+    /* 서버에서 사라진 세트는 로컬에서도 지운다(관리자 삭제 반영). */
+    function forgetAnswerKey(sig) {
+        if (!answerKeys[sig]) return;
+        delete answerKeys[sig];
+        repaintAnswerKeyViews();
     }
 
     async function loadAnswerKeys(silent) {
@@ -3731,14 +3790,15 @@ ${JSON.stringify(issuesArr)}
                 const snap = await withTimeout(getDocs(collection(db, AK_COLL)), 9000, "정답세트 읽기");
                 const docs = []; snap.forEach((d) => docs.push({ _dbId: d.id, ...d.data() }));
                 apply(docs);
-                return;
+                return true;
             } catch (e) { console.warn("정답세트 SDK 읽기 실패 → REST 시도:", e); }
         }
-        try { apply(await restFetchCollection(AK_COLL, 300)); }
+        try { apply(await restFetchCollection(AK_COLL, 300)); return true; }
         catch (e) {
             console.warn("정답세트 REST 읽기 실패:", e);
             _akLoaded = true;
             if (!silent) showToast("정답 세트를 불러오지 못했습니다");
+            return false;   // [수정30] 실패를 호출자에게 알린다
         }
     }
 
@@ -3769,7 +3829,11 @@ ${JSON.stringify(issuesArr)}
         } catch (e) { console.warn("정답세트 변경표시 갱신 실패(무시):", e); }
     }
 
-    // 변경되었는지만 확인한다. true = 바뀜(전체를 다시 읽어야 함)
+    /* 변경되었는지만 확인한다. → { changed, rev }
+       [수정30] 예전에는 boolean 을 돌려주면서 여기서 곧바로 _akRevSeen 을 올렸다.
+       그러면 뒤이은 전체 읽기가 실패했을 때 '이미 반영했다'고 기억해 버려서,
+       그 변경분을 영영 가져오지 못했다. 표시를 올리는 일은 읽기에 성공한
+       호출자(syncNow)가 맡는다. */
     async function answerKeyChanged() {
         try {
             let rev = "";
@@ -3779,10 +3843,10 @@ ${JSON.stringify(issuesArr)}
                 rev = (snap && snap.exists && snap.exists()) ? String((snap.data() || {}).rev || "") : "";
             } else {
                 const cfg = window.FB || {};
-                if (!cfg.projectId || !cfg.apiKey) return true;
+                if (!cfg.projectId || !cfg.apiKey) return { changed: true, rev: "" };
                 const url = `https://firestore.googleapis.com/v1/projects/${cfg.projectId}/databases/(default)/documents/${AK_COLL}/${AK_VER_DOC}?key=${encodeURIComponent(cfg.apiKey)}`;
                 const res = await withTimeout(fetch(url), 5000, "변경 확인");
-                if (!res.ok) return res.status === 404 ? false : true;
+                if (!res.ok) return { changed: res.status !== 404, rev: "" };
                 const j = await res.json();
                 rev = String(((j.fields || {}).rev || {}).stringValue || "");
             }
@@ -3792,16 +3856,15 @@ ${JSON.stringify(issuesArr)}
                이때만 예외로, 30초에 한 번은 전체를 다시 읽어 확인한다. */
             if (!rev) {
                 const now = Date.now();
-                if (now - _akFullPull < 30000) return false;
+                if (now - _akFullPull < 30000) return { changed: false, rev: "" };
                 _akFullPull = now;
-                return true;
+                return { changed: true, rev: "" };
             }
-            if (rev === _akRevSeen) return false; // 변화 없음 — 여기서 끝(수십 바이트)
-            _akRevSeen = rev;
-            return true;
+            if (rev === _akRevSeen) return { changed: false, rev }; // 변화 없음 — 여기서 끝(수십 바이트)
+            return { changed: true, rev };
         } catch (e) {
             console.warn("정답세트 변경 확인 실패:", e);
-            return false;
+            return { changed: false, rev: "" };
         }
     }
 
@@ -4685,9 +4748,21 @@ ${JSON.stringify(I)}
                 const { db, doc, getDoc } = window.fs;
                 const snap = await withTimeout(getDoc(doc(db, AK_COLL, docId)), 6000, "정답세트 확인");
                 if (snap && snap.exists && snap.exists()) {
-                    applyAnswerKeyDocs([{ _dbId: docId, ...snap.data() }, ...Object.values(answerKeys).map((a) => ({ _dbId: a.docId, sig: a.sig, photoId: a.photoId, analystCount: a.analystCount, builtAt: a.builtAt, usage: a.usage, itemsJson: JSON.stringify(a.items || []), rejectedCandsJson: JSON.stringify(a.rejectedCands || []) }))]);
-                    return getAnswerKey(photoImage);
+                    /* [수정30] 읽어온 문서 '하나만' 제자리에 갈아끼운다.
+                       ---------------------------------------------------------
+                       예전에는 서버 최신본 뒤에 메모리에 있던 낡은 사본 전부를
+                       이어붙여 applyAnswerKeyDocs 에 넘겼다. 그런데 그 목록에는
+                       지금 열려는 사진의 낡은 사본도 같은 sig 로 들어 있어서,
+                       map[sig] = ... 를 순서대로 실행하는 동안 뒤엣것(낡은 것)이
+                       앞엣것(최신본)을 덮어썼다. 결과적으로 이 함수는 서버를
+                       읽고도 아무 일도 하지 않았고, 관리자가 정답을 고쳐도
+                       응시자 화면은 예전 정답 그대로였다.
+                       덤으로, 되밀어 넣던 사본에는 coreMin·orphanCount·
+                       droppedCount·needsReview 가 빠져 있어 다른 사진의 값까지
+                       0/false 로 뭉개고 그대로 캐시에 저장하고 있었다. */
+                    return upsertAnswerKeyDoc({ _dbId: docId, ...snap.data() });
                 }
+                forgetAnswerKey(sig);   // 서버에서 삭제된 세트는 로컬에서도 지운다
                 return null;
             }
         } catch (e) { console.warn("정답세트 즉시 확인 실패(무시):", e); }
@@ -4831,10 +4906,15 @@ ${JSON.stringify(I)}
                      입력하신 위험요인 ${inputs.length}건은 자료로 저장했습니다.</span>`);
                 return;
             }
-            const changed = (latest.builtAt || 0) !== (quizKey.builtAt || 0)
-                || (latest.items || []).length !== (quizKey.items || []).length;
+            /* [수정30] 갱신 판정을 내용 비교로 바꿨다.
+               builtAt 은 akSave 가 편집해도 그대로 유지하고, 항목 수도
+               문구만 고치거나 하나를 다른 것으로 바꾸면 그대로다.
+               그래서 예전 조건으로는 관리자의 '내용 수정'을 전혀 잡지 못했다.
+               어차피 latest 가 제출 시점의 정답이므로 항상 그것으로 채점하고,
+               실제로 달라졌을 때만 사용자에게 알린다. */
+            const changed = JSON.stringify(latest.items || []) !== JSON.stringify(quizKey.items || []);
+            quizKey = latest;
             if (changed) {
-                quizKey = latest;
                 applyQuizChrome(true);
                 showToast("🔄 정답 세트가 방금 갱신되어 최신본으로 채점합니다");
             }
@@ -5776,7 +5856,10 @@ ${JSON.stringify(I)}
         }
     }
     function closeAkModal() { document.getElementById("akModal").classList.remove("show"); }
-    async function refreshAnswerKeys() { await loadAnswerKeys(false); showToast("🔄 정답 세트를 새로 읽었습니다"); }
+    async function refreshAnswerKeys() {
+        const ok = await loadAnswerKeys(false);   // [수정30] 실패했으면 성공했다고 말하지 않는다
+        if (ok) showToast("🔄 정답 세트를 새로 읽었습니다");
+    }
 
 
     /* =========================================================
