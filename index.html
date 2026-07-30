@@ -3207,6 +3207,7 @@ ${JSON.stringify(issuesArr)}
                     needsReview: !!d.needsReview,
                     builtAt: Number(d.builtAt || 0),
                     usage: (d.usage === "quiz") ? "quiz" : "both",
+                    rejectedCands: (() => { try { const v = JSON.parse(d.rejectedCandsJson || "[]"); return Array.isArray(v) ? v : []; } catch (_) { return []; } })(),
                     items
                 };
             });
@@ -3245,6 +3246,7 @@ ${JSON.stringify(issuesArr)}
             needsReview: !!ak.needsReview,          // [수정2] 임계치 미달 완화 여부
             builtAt: ak.builtAt || Date.now(),
             usage: usageOf(ak),
+            rejectedCandsJson: JSON.stringify(rejectedCands(ak)),
             itemsJson: JSON.stringify(ak.items || [])
         };
         const docId = AK_PREFIX + ak.sig;
@@ -3410,7 +3412,7 @@ ${JSON.stringify(issuesArr)}
             if (!cur || r.timestamp < cur.timestamp) firstOf.set(k, r);
         });
 
-        const clusters = [];   // { title, norm, people:Set, texts:Set }
+        const clusters = [];   // { title, norm, people:Map(pkey->기여자), texts:Set }
         firstOf.forEach((r) => {
             const seen = new Set();
             (r.extras || []).forEach((t) => {
@@ -3418,13 +3420,20 @@ ${JSON.stringify(issuesArr)}
                 if (!n || seen.has(n)) return;
                 seen.add(n);
                 let hit = clusters.find((c) => c.norm === n || dice(c.norm, n) >= 0.62);
-                if (!hit) { hit = { title: t, norm: n, people: new Set(), texts: new Set() }; clusters.push(hit); }
-                hit.people.add(r.pkey || ("anon:" + r.dbId));
+                if (!hit) { hit = { title: t, norm: n, people: new Map(), texts: new Set() }; clusters.push(hit); }
+                const pk = r.pkey || ("anon:" + r.dbId);
+                if (!hit.people.has(pk)) hit.people.set(pk, { pkey: pk, name: r.name || "익명", org: r.org || "", text: t, timestamp: r.timestamp });
                 hit.texts.add(t);
             });
         });
+
         return clusters
-            .map((c) => ({ title: c.title, support: c.people.size, texts: [...c.texts] }))
+            .map((c) => ({
+                title: c.title, norm: c.norm,
+                support: c.people.size,
+                people: [...c.people.values()],
+                texts: [...c.texts]
+            }))
             .sort((a, b) => b.support - a.support);
     }
 
@@ -4351,10 +4360,36 @@ ${JSON.stringify(I)}
          - null  → 기존 동작 그대로 (판정 전이라고 해서 벌하지 않는다)
        ========================================================= */
     let _mnSig = null;
+    let _mnCand = [];      // 현재 모달에 띄운 승격 후보 (기여자 정보 포함)
 
     // 채점·표시에서 제외할 항목 (전문가가 '틀리다'로 판정한 것)
     function isRejected(it) { return it && it.verdict === "no"; }
     function gradableItems(ak) { return (ak && ak.items ? ak.items : []).filter((it) => !isRejected(it)); }
+
+    /* [수정7] 아직 정답 세트에 없고, 전문가가 '틀리다'로 거른 적도 없는 신규 지적만 추린다. */
+    function rejectedCands(ak) { return (ak && Array.isArray(ak.rejectedCands)) ? ak.rejectedCands : []; }
+    function akCoreMin(ak) {
+        return ak.coreMin || Math.min(5, Math.max(2, Math.ceil(Number(ak.analystCount || 0) * 0.2)));
+    }
+    function newCandidates(sig, ak) {
+        const rej = rejectedCands(ak).map(normText);
+        return promotionCandidates(sig)
+            .filter((c) => c.support >= 2)
+            .filter((c) => rej.indexOf(normText(c.title)) < 0)
+            .filter((c) => !(ak.items || []).some((it) => localRelation(c.title, it) === "same"));
+    }
+    // 분류를 기준 카테고리 키워드로 추정한다(관리자가 나중에 편집 가능).
+    function guessCategory(text) {
+        const t = String(text || "");
+        const cats = getCategories();
+        let best = "기타", hit = 0;
+        for (const name in cats) {
+            let n = 0;
+            (cats[name] || []).forEach((k) => { if (k && t.indexOf(k) >= 0) n++; });
+            if (n > hit) { hit = n; best = name; }
+        }
+        return best;
+    }
 
     function openMinorityModal(sig) {
         const ak = answerKeys[sig];
@@ -4364,25 +4399,50 @@ ${JSON.stringify(I)}
             .filter((x) => x.it.core === false)
             .sort((a, b) => (Number(b.it.support || 1) - Number(a.it.support || 1)));
 
-        document.getElementById("mnModalTitle").textContent = `🧑‍⚖️ 소수의견 판정 (${minors.length}건)`;
         const body = document.getElementById("mnBody");
+        const cand = _qrLoaded ? newCandidates(sig, ak) : [];
+        _mnCand = cand;                 // 저장 시 기여자 정보를 쓰기 위해 보관
+        const cm = akCoreMin(ak);
 
-        if (minors.length === 0) {
-            body.innerHTML = `<div class="empty-state">판정할 소수의견이 없습니다.<br>
-                모든 항목이 핵심 정답 기준을 넘었습니다.</div>`;
+        document.getElementById("mnModalTitle").textContent =
+            `🧑‍⚖️ 소수의견 판정 (기존 ${minors.length}건${cand.length ? " · 신규 " + cand.length + "건" : ""})`;
+
+        if (minors.length === 0 && cand.length === 0) {
+            body.innerHTML = `<div class="empty-state">판정할 항목이 없습니다.<br>
+                모든 항목이 핵심 정답 기준을 넘었고, 새로 올라온 지적도 없습니다.</div>`;
+            document.getElementById("mnModal").classList.add("show");
             return;
         }
 
-        const cand = _qrLoaded ? promotionCandidates(sig).filter((c) => c.support >= 2) : [];
-        const candHtml = cand.length
-            ? `<div style="background:#f4f0ff; border:1px solid var(--admin); border-radius:10px; padding:10px 12px; margin:0 0 14px;">
-                 <b style="color:var(--admin)">📥 수준진단에서 올라온 신규 지적 ${cand.length}건</b>
-                 <div style="font-size:.78rem; color:var(--muted); margin:4px 0 6px;">
-                   아직 정답 세트에 없는 항목입니다. 타당하면 '정답 세트 편집 → 항목 추가'로 넣어 주세요.</div>
-                 ${cand.map((c) => `<span class="reviewed-badge" style="margin:2px 4px 2px 0; display:inline-block;">
-                   ${esc(c.title)} <b style="color:var(--admin)">${c.support}명</b></span>`).join("")}
-               </div>`
-            : "";
+        const candHtml = !_qrLoaded
+            ? `<div style="background:#f8fafc; border:1px dashed var(--line); border-radius:10px; padding:10px 12px; margin:0 0 14px; font-size:.8rem; color:var(--muted);">
+                 📥 수준진단에서 올라온 신규 지적을 함께 보려면, 관리자 화면에서
+                 <b>'🔄 진단 기록 불러오기'</b>를 먼저 눌러 주세요.</div>`
+            : (cand.length
+                ? `<div style="background:#f4f0ff; border:1px solid var(--admin); border-radius:10px; padding:12px; margin:0 0 16px;">
+                     <b style="color:var(--admin)">📥 수준진단에서 올라온 신규 지적 ${cand.length}건</b>
+                     <div style="font-size:.78rem; color:var(--muted); margin:4px 0 10px;">
+                       정답 세트에 없는데 서로 다른 응시자 2명 이상이 지적한 항목입니다.
+                       <b>맞다</b>를 누르면 저장할 때 정답 세트에 자동으로 추가됩니다.
+                       (${cm}명 이상이면 핵심, 그 미만이면 보너스 항목)</div>
+                     <div id="mnCands">${cand.map((c, ci) => `
+                       <div class="ak-item mn-crow" data-ci="${ci}" data-verdict=""
+                            data-title="${esc(c.title)}" data-support="${c.support}"
+                            data-texts="${esc(JSON.stringify(c.texts || []))}">
+                         <div class="top" style="align-items:center;">
+                           <div style="flex:1; min-width:0;">
+                             <b style="font-size:.95rem;">${esc(c.title)}</b>
+                             <span class="ak-sup" style="margin-left:6px; color:var(--admin)">${c.support}명 지적</span>
+                             <div style="font-size:.74rem; color:var(--faint); margin-top:3px;">
+                               예상 분류: ${esc(guessCategory(c.title))}${(c.texts || []).length > 1 ? " · 원문: " + esc(c.texts.slice(0, 3).join(", ")) : ""}
+                             </div>
+                           </div>
+                           <button class="btn btn-sm mn-ok btn-ghost" onclick="App.setCandVerdict(${ci},'ok')" style="flex:none;">⭕ 맞다</button>
+                           <button class="btn btn-sm mn-no btn-ghost" onclick="App.setCandVerdict(${ci},'no')" style="flex:none;">❌ 틀리다</button>
+                         </div>
+                       </div>`).join("")}</div>
+                   </div>`
+                : "");
 
         body.innerHTML = `
         <p style="font-size:.82rem; color:var(--muted); margin:0 0 12px;">
@@ -4428,11 +4488,66 @@ ${JSON.stringify(I)}
         no.className = "btn btn-sm mn-no " + (next === "no" ? "btn-danger" : "btn-ghost");
     }
 
+    // [수정7] 신규 지적 후보의 판정 토글 (버튼은 있었는데 이 함수가 없어 동작하지 않았다)
+    function setCandVerdict(ci, v) {
+        const row = document.querySelector(`#mnCands .mn-crow[data-ci="${ci}"]`);
+        if (!row) return;
+        const next = (row.dataset.verdict === v) ? "" : v;
+        row.dataset.verdict = next;
+        const ok = row.querySelector(".mn-ok"), no = row.querySelector(".mn-no");
+        ok.className = "btn btn-sm mn-ok " + (next === "ok" ? "btn-success" : "btn-ghost");
+        no.className = "btn btn-sm mn-no " + (next === "no" ? "btn-danger" : "btn-ghost");
+    }
+
+    /* [수정7] 승인된 신규 지적을 낸 응시자를 '분석자'로 inspections 에 등록한다.
+       진단자 = 분석자. 이미 같은 사람의 기록이 있으면 등록 화면과 똑같은 방식으로
+       (이름+소속+사진 기준) 기존 문서에 지적을 합쳐 한 건으로 유지한다. */
+    async function registerQuizAnalysts(photoImage, people, text) {
+        let added = 0, merged = 0;
+        for (const p of (people || [])) {
+            const name = String(p.name || "").trim();
+            if (!name || /^(익명|무명)$/.test(name)) continue;   // 식별 불가한 응시자는 건너뛴다
+            const org = String(p.org || "").trim();
+            const mine = String(p.text || text || "").trim();
+            if (!mine) continue;
+            try {
+                const found = await findServerDups(name, org, photoImage);
+                const list = (found.list || []).slice().sort((a, b) => (a.timestamp || 0) - (b.timestamp || 0));
+                let basePins = [];
+                list.forEach((m) => { basePins = basePins.concat(normalizePins(m)); });
+
+                // 같은 뜻을 이미 적어 둔 사람은 중복 추가하지 않는다.
+                const dup = basePins.some((pin) => normText(pin.text) === normText(mine));
+                if (dup) { merged++; continue; }
+
+                const pins = basePins.concat([{ id: Date.now() + added, x: 50, y: 50, text: mine, listOnly: true }]);
+                const keeper = list[0] || null;
+                const entry = {
+                    id: (keeper && keeper.id) || Date.now(),
+                    timestamp: Date.now(),
+                    name, org,
+                    issues: pins.map((x) => x.text),
+                    pins,
+                    photo: photoImage,
+                    from: "quiz"                    // 진단에서 편입된 기록임을 표시
+                };
+                await persistEntry(entry, keeper ? keeper.dbId : null);
+                if (keeper) merged++; else added++;
+            } catch (e) {
+                console.warn("분석자 등록 실패:", name, e);
+            }
+        }
+        return { added, merged };
+    }
+
     async function saveMinorityVerdicts() {
         const ak = answerKeys[_mnSig];
         if (!ak) { closeMinorityModal(); return; }
         const who = (document.getElementById("userName") || {}).value || "";
+        const by = String(who).trim() || "관리자";
         let changed = 0;
+
+        // ① 기존 소수의견 판정
         document.querySelectorAll("#mnItems .mn-row").forEach((row) => {
             const i = Number(row.dataset.i);
             const it = ak.items[i];
@@ -4440,20 +4555,72 @@ ${JSON.stringify(I)}
             const v = row.dataset.verdict || null;
             if ((it.verdict || null) === v) return;
             it.verdict = v;
-            it.verdictBy = v ? (String(who).trim() || "관리자") : "";
+            it.verdictBy = v ? by : "";
             it.verdictAt = v ? Date.now() : 0;
             changed++;
         });
+
+        // ② 신규 지적 후보 판정
+        const cm = akCoreMin(ak);
+        const approve = [], reject = [];
+        document.querySelectorAll("#mnCands .mn-crow").forEach((row) => {
+            const v = row.dataset.verdict || "";
+            if (!v) return;
+            const c = _mnCand[Number(row.dataset.ci)];
+            if (!c) return;
+            (v === "ok" ? approve : reject).push(c);
+        });
+
+        approve.forEach((c) => {
+            const core = c.support >= cm;
+            ak.items.push({
+                key: "q" + Date.now() + Math.floor(Math.random() * 1000),
+                title: c.title,
+                category: guessCategory(c.title),
+                aliases: uniqStr(c.texts || [c.title]),
+                broader: [],
+                support: c.support,
+                status: core ? "core" : "optional",
+                core,
+                verdict: "ok", verdictBy: by, verdictAt: Date.now(),
+                fromQuiz: true              // 수준진단에서 올라와 승인된 항목
+            });
+            changed++;
+        });
+        if (reject.length) {
+            // 기각한 표현은 기록해 두어 다음에 다시 올라오지 않게 한다.
+            ak.rejectedCands = uniqStr([].concat(rejectedCands(ak), reject.map((c) => c.title)));
+            changed += reject.length;
+        }
+
         if (!changed) { closeMinorityModal(); showToast("변경된 판정이 없습니다"); return; }
 
-        busyShow("💾 소수의견 판정 저장", ["서버에 저장"]);
+        const photo = photoList.find((p) => sigOf(p.image) === _mnSig);
+        const steps = ["정답 세트 저장"];
+        if (approve.length && photo) steps.push("응시자를 분석자로 등록");
+        busyShow("💾 판정 저장", steps);
         try {
             busyStep(0);
             await persistAnswerKey(ak);
+
+            let reg = { added: 0, merged: 0 };
+            if (approve.length && photo) {
+                busyStep(1);
+                for (const c of approve) {
+                    const r = await registerQuizAnalysts(photo.image, c.people, c.title);
+                    reg.added += r.added; reg.merged += r.merged;
+                }
+            }
             busyHide();
             closeMinorityModal();
             renderAnswerKeyPanel();
-            showToast(`💾 ${changed}건의 판정을 저장했습니다`);
+            renderQuizInflowPanel();
+
+            let msg = `💾 저장 완료`;
+            if (approve.length) msg += ` · 정답 세트에 ${approve.length}건 추가`;
+            if (reject.length) msg += ` · ${reject.length}건 기각`;
+            if (reg.added || reg.merged) msg += ` · 분석자 등록 ${reg.added}명(기존 기록 병합 ${reg.merged}건)`;
+            showToast(msg);
         } catch (e) {
             busyHide();
             showToast("❌ 저장 실패: " + (e.message || e));
@@ -4787,7 +4954,7 @@ ${JSON.stringify(I)}
         /* --- [수정3] 수준진단 유입 --- */
         refreshQuizResults, exportQuizResults,
         /* --- [수정4] 소수의견 전문가 판정 --- */
-        openMinorityModal, setVerdict, saveMinorityVerdicts, closeMinorityModal
+        openMinorityModal, setVerdict, setCandVerdict, saveMinorityVerdicts, closeMinorityModal
     };
 })();
 
