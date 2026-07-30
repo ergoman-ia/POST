@@ -2875,10 +2875,6 @@
     }
 
     async function analyzeWithGemini(issuesArr, categories) {
-        const { GoogleGenerativeAI } = await import("https://esm.run/@google/generative-ai");
-        const genAI = new GoogleGenerativeAI(window.GEMINI_API_KEY);
-        const model = genAI.getGenerativeModel({ model: "gemini-3-flash-preview" });
-
         const prompt = `
 당신은 건설 현장의 최고 안전보건 전문가입니다.
 아래 제공되는 [기준 카테고리]를 "법전"처럼 참고하여, [지적 사항들]을 가장 적합한 카테고리로 그룹화해 주세요.
@@ -2908,13 +2904,19 @@ ${JSON.stringify(categories)}
 ${JSON.stringify(issuesArr)}
 `;
         try {
-            const result = await model.generateContent(prompt);
-            let text = (await result.response).text();
-            text = text.replace(/```json/g, "").replace(/```/g, "").trim();
-            return JSON.parse(text);
+            /* [수정29] 정답 세트 생성과 같은 호출 경로를 쓴다.
+               할당량 초과 시 대체 모델 전환·재시도·정확한 안내가 함께 적용된다. */
+            const text = await askGemini(prompt);
+            const parsed = parseJsonLoose(text);
+            if (!Array.isArray(parsed)) throw new Error("AI가 그룹 목록을 만들지 못했습니다");
+            return parsed;
         } catch (err) {
-            console.error("AI 응답 파싱 실패:", err);
-            throw new Error("AI 분석 결과를 처리하지 못했습니다. 다시 시도해 주세요.");
+            console.error("AI 분석 실패:", err);
+            const q = readQuotaError(err);
+            // 할당량 문제면 askGemini 가 만든 안내를 그대로 전한다(원인을 감추지 않는다).
+            throw new Error(q || /한도/.test(String(err && err.message))
+                ? (err.message || "무료 사용 한도를 초과했습니다")
+                : "AI 분석 결과를 처리하지 못했습니다. 다시 시도해 주세요.");
         }
     }
 
@@ -4119,16 +4121,85 @@ ${JSON.stringify(issuesArr)}
     }
     function stopElapsed() { if (_elapTimer) { clearInterval(_elapTimer); _elapTimer = null; } }
 
-    /* ---------- Gemini 공통 ---------- */
+    /* =========================================================
+       [수정29] Gemini 호출 공통 — 할당량 대응
+       ---------------------------------------------------------
+       무료 등급은 모델마다 하루 요청 수가 정해져 있고, 특히 preview 모델은
+       한도가 매우 작다(예: gemini-3-flash preview = 하루 20건).
+       테스트를 몇 번 반복하면 금방 소진되는데, 예전 코드는 이때도
+       "AI 분석 결과를 처리하지 못했습니다. 다시 시도해 주세요"라고만 해서
+       앱이 고장 난 것처럼 보이고, 다시 눌러도 될 리가 없었다.
+       · 429 를 '분당 한도'와 '일일 한도'로 나눠 다르게 대응한다.
+       · 일일 한도에 걸리면 다음 모델로 자동 전환해 작업을 계속한다.
+       · 사용자에게는 원인과 할 수 있는 일을 그대로 알려준다.
+       ========================================================= */
+    const GEMINI_MODELS = [
+        "gemini-3-flash-preview",   // 품질 우선 (무료 한도가 가장 작다)
+        "gemini-2.5-flash",         // 안정판 — 한도가 훨씬 넉넉하다
+        "gemini-2.5-flash-lite"     // 최후 수단 — 한도가 가장 크다
+    ];
+    let _geminiModelIdx = 0;        // 이 세션에서 지금 쓰는 모델
+
+    // 429 응답을 해석한다. { rate:분당한도 } / { daily:일일한도 } / null
+    function readQuotaError(err) {
+        const m = String((err && err.message) || err || "");
+        if (m.indexOf("429") < 0 && !/quota|rate limit/i.test(m)) return null;
+        const daily = /PerDay|RequestsPerDay|free_tier_requests/i.test(m);
+        let wait = 0;
+        const r = m.match(/retryDelay"?\s*:?\s*"?(\d+(?:\.\d+)?)s/i) || m.match(/retry in (\d+(?:\.\d+)?)s/i);
+        if (r) wait = Math.ceil(parseFloat(r[1]));
+        const lim = m.match(/limit:\s*(\d+)/i);
+        return { daily, wait: wait || 0, limit: lim ? lim[1] : "" };
+    }
+
+    function quotaMessage(q, model) {
+        if (!q) return "";
+        return q.daily
+            ? `오늘 ${model} 모델의 무료 사용 한도(${q.limit || "일일"}건)를 다 썼습니다.`
+            : `요청이 너무 잦습니다(분당 한도). ${q.wait || 20}초 뒤에 다시 시도할 수 있습니다.`;
+    }
+
+    const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
     // onModelReady: 모델 로딩이 끝나고 실제 AI 응답을 기다리기 시작할 때 호출된다.
     async function askGemini(prompt, onModelReady) {
         if (!window.GEMINI_API_KEY) throw new Error("Gemini API 키가 없습니다 (secrets.js 확인)");
         const { GoogleGenerativeAI } = await import("https://esm.run/@google/generative-ai");
         const genAI = new GoogleGenerativeAI(window.GEMINI_API_KEY);
-        const model = genAI.getGenerativeModel({ model: "gemini-3-flash-preview" });
         if (typeof onModelReady === "function") onModelReady();
-        const result = await withTimeout(model.generateContent(prompt), 120000, "AI 응답");
-        return (await result.response).text();
+
+        let lastQuota = null, lastErr = null;
+        for (let i = _geminiModelIdx; i < GEMINI_MODELS.length; i++) {
+            const name = GEMINI_MODELS[i];
+            const model = genAI.getGenerativeModel({ model: name });
+            for (let attempt = 0; attempt < 2; attempt++) {
+                try {
+                    const result = await withTimeout(model.generateContent(prompt), 120000, "AI 응답");
+                    _geminiModelIdx = i;                       // 다음 호출부터 이 모델을 먼저 쓴다
+                    if (i > 0) console.log("[점검앱] 대체 모델 사용:", name);
+                    return (await result.response).text();
+                } catch (e) {
+                    lastErr = e;
+                    const q = readQuotaError(e);
+                    if (!q) throw e;                            // 할당량 문제가 아니면 그대로 알린다
+                    lastQuota = q;
+                    if (!q.daily && attempt === 0) {            // 분당 한도 → 기다렸다 한 번 더
+                        const w = Math.min(Math.max(q.wait, 5), 30);
+                        showToast(`⏳ 요청이 몰려 ${w}초 기다린 뒤 다시 시도합니다`);
+                        await sleep(w * 1000);
+                        continue;
+                    }
+                    break;                                      // 일일 한도 → 다음 모델로
+                }
+            }
+            if (i + 1 < GEMINI_MODELS.length) {
+                showToast(`⚠️ ${name} 한도 소진 → ${GEMINI_MODELS[i + 1]}(으)로 바꿔 계속합니다`);
+            }
+        }
+        const msg = quotaMessage(lastQuota, GEMINI_MODELS[GEMINI_MODELS.length - 1]);
+        throw new Error(msg
+            ? `${msg}\n모든 대체 모델도 한도를 넘겼습니다. 한도는 보통 다음 날(태평양 시간 자정) 초기화됩니다.\n· 급하시면 Google AI Studio에서 결제를 등록하거나 다른 API 키를 쓰세요.\n· 이미 만들어 둔 정답 세트와 저장된 자료는 그대로 쓸 수 있습니다.`
+            : (lastErr && lastErr.message) || "AI 호출에 실패했습니다");
     }
     function parseJsonLoose(raw) {
         let t = String(raw || "").replace(/```json/gi, "").replace(/```/g, "").trim();
