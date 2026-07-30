@@ -442,6 +442,18 @@
             .print-report th, .print-report td { border: 1px solid #999; padding: 8px 10px; vertical-align: top; font-size: 11pt; }
             .print-report th { background: #f1f5f9 !important; -webkit-print-color-adjust: exact; print-color-adjust: exact; }
             .print-report tr { break-inside: avoid; }
+            /* [수정24] 보고서 머리말 · 현장 사진.
+               인쇄 크기는 px 가 아니라 mm 로 잡아야 용지에서 예측대로 나온다.
+               A4 가로(297×210mm)에 표까지 들어가야 하므로 높이를 60mm 로 묶는다. */
+            .print-report .rpt-head { text-align: center; margin-bottom: 10px; padding-bottom: 8px; border-bottom: 2px solid #333; }
+            .print-report .rpt-photo {
+                display: block; margin: 6px auto 4px;
+                max-width: 130mm; max-height: 60mm; width: auto; height: auto;
+                object-fit: contain; border: 1px solid #999;
+                break-inside: avoid;
+                -webkit-print-color-adjust: exact; print-color-adjust: exact;
+            }
+            .print-report .rpt-meta { margin: 2px 0 0; font-size: 10pt; color: #444; }
         }
 
         /* =========================================================
@@ -2941,7 +2953,7 @@ ${JSON.stringify(issuesArr)}
                 ratio: ((items.length / total) * 100).toFixed(1) + "%"
             };
         });
-        download(`유사도 재그룹 결과_${stamp()}.json`, JSON.stringify({ report: savedReport, names: analyzedNames || "저장된 분석 결과" }, null, 2));
+        download(`유사도 재그룹 결과_${stamp()}.json`, JSON.stringify({ report: savedReport, names: analyzedNames || "저장된 분석 결과", photo: reportPhoto, people: reportPeople }, null, 2));
         document.getElementById("analyzeBtn").style.display = "none";
         document.getElementById("reportBtn").style.display = "inline-flex";
         document.getElementById("resetSimBtn").style.display = "inline-flex";
@@ -2981,9 +2993,17 @@ ${JSON.stringify(issuesArr)}
     function printReport() {
         if (!savedReport) return;
         const html = `<div class="print-report">
-            <div style="text-align:center; margin-bottom:14px; padding-bottom:10px; border-bottom:2px solid #333;">
-                <h1>선택 항목 문제점 그룹화 결과</h1>
-                <p style="margin-top:8px;">${esc(analyzedNames)}</p>
+            <div class="rpt-head">
+                <h1>현장 위험요인 그룹화 보고서</h1>
+                ${reportPhoto
+                    ? `<img class="rpt-photo" src="${reportPhoto}" alt="현장 사진">
+                       <p class="rpt-meta">참여 <b>${reportPeople}</b>명${(() => {
+                           const ak = getAnswerKey(reportPhoto);
+                           return ak ? ` · 정답 세트 ${ak.items.length}개 항목(핵심 ${coreItems(ak).length}개)` : "";
+                       })()}</p>`
+                    : `<p class="rpt-meta">여러 사진의 내용이 함께 선택되어 대표 사진을 표시하지 않습니다.</p>`}
+                <p style="margin-top:6px;">${esc(analyzedNames)}</p>
+                <p class="rpt-meta">출력일 ${new Date().toLocaleDateString("ko-KR")}</p>
             </div>
             <table>
                 <thead><tr>
@@ -3044,7 +3064,11 @@ ${JSON.stringify(issuesArr)}
         reader.onload = (evt) => {
             try {
                 const loaded = JSON.parse(evt.target.result);
-                if (loaded.report && loaded.names) { savedReport = loaded.report; analyzedNames = loaded.names; }
+                if (loaded.report && loaded.names) {
+                    savedReport = loaded.report; analyzedNames = loaded.names;
+                    // [수정24] 불러온 보고서에도 대상 사진을 복원한다.
+                    reportPhoto = loaded.photo || null; reportPeople = Number(loaded.people || 0);
+                }
                 else if (Array.isArray(loaded)) { savedReport = loaded; analyzedNames = "불러온 데이터 분석 결과"; }
                 else throw new Error("지원하지 않는 파일 형식입니다.");
                 document.getElementById("analyzeBtn").style.display = "none";
