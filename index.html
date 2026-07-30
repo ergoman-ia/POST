@@ -984,7 +984,7 @@
 
         watchGallery();
         watchData();
-        loadAnswerKeys(true);
+        watchAnswerKeys();   // [수정14] 정답 세트도 실시간 구독
 
         // 백그라운드 복귀 시 재연결 핸들러 등록
         wireVisibilityRecovery();
@@ -1054,6 +1054,7 @@
         // 연결을 새로 잡은 뒤 재구독 + 안전망 타이머 재무장
         watchGallery();
         watchData();
+        watchAnswerKeys();   // [수정14] 정답 세트도 실시간 구독
 
         _reconnecting = false;
     }
@@ -1711,6 +1712,7 @@
 
         watchGallery();
         watchData();
+        watchAnswerKeys();   // [수정14] 정답 세트도 실시간 구독
     }
 
     /* =========================================================
@@ -1745,6 +1747,14 @@
         let visible = photoList.filter((p) => !p.isHidden);
 
         if (appMode === "quiz") {
+            /* [수정14] 정답 세트를 아직 못 읽었으면 '없음'으로 단정하지 않는다.
+               예전에는 로딩 중에도 '🤖 정답세트 생성'으로 보여서,
+               다른 기기가 이미 만들어 둔 것을 또 만드는 일이 생겼다. */
+            if (!_akLoaded) {
+                wrap.innerHTML = `<div class="empty-state">🔄 정답 세트를 확인하는 중입니다…<br>
+                    <span style="font-size:.8rem; color:var(--faint);">잠시만 기다려 주세요.</span></div>`;
+                return;
+            }
             // 수준 진단: 분석자가 충분히 참여한 사진만 (정답 세트를 만들 수 있는 사진)
             const mn = quizMin();
             visible = visible.filter((p) => cntOf(p) >= mn || !!getAnswerKey(p.image));
@@ -3219,8 +3229,33 @@ ${JSON.stringify(issuesArr)}
     }
 
     /* ---------- 정답 세트 로드 / 저장 / 삭제 ---------- */
-    async function loadAnswerKeys(silent) {
-        const apply = (docs) => {
+    /* [수정14] 정답 세트 실시간 동기화.
+       기존에는 정답 세트만 onSnapshot 없이 매번 통째로 다시 읽었다.
+       그래서 다른 기기가 만든 정답 세트가 이 기기에 뜨기까지
+       (SDK 타임아웃 9초 → REST 인증 → 재조회) 1분 가까이 걸렸고,
+       그 사이 '생성하세요'로 보여서 같은 정답 세트를 또 만드는 일이 생겼다. */
+    let _akUnsub = null;
+    function watchAnswerKeys() {
+        if (!fsReady()) { loadAnswerKeys(true); return; }
+        try { if (_akUnsub) _akUnsub(); } catch (_) { }
+        const { db, collection, onSnapshot } = window.fs;
+        try {
+            _akUnsub = onSnapshot(collection(db, AK_COLL), (snap) => {
+                const docs = []; snap.forEach((d) => docs.push({ _dbId: d.id, ...d.data() }));
+                applyAnswerKeyDocs(docs);
+            }, (err) => {
+                console.warn("정답세트 실시간 동기화 오류 → 1회 읽기로 대체:", err);
+                loadAnswerKeys(true);
+            });
+        } catch (e) {
+            console.warn("정답세트 구독 실패 → 1회 읽기로 대체:", e);
+            loadAnswerKeys(true);
+        }
+        // 실시간 구독이 막히는 환경 대비 안전망
+        setTimeout(() => { if (!_akLoaded) loadAnswerKeys(true); }, 4000);
+    }
+
+    function applyAnswerKeyDocs(docs) {
             const map = {};
             (docs || []).forEach((d) => {
                 const id = d._dbId || d.id || "";
@@ -3247,8 +3282,10 @@ ${JSON.stringify(issuesArr)}
             _akLoaded = true;
             renderAnswerKeyPanel();
             if (appMode === "quiz") renderUserGallery();
-        };
+    }
 
+    async function loadAnswerKeys(silent) {
+        const apply = applyAnswerKeyDocs;
         if (window.fs && window.fs.db && window.fs.getDocs && window.fs.collection) {
             try {
                 const { db, collection, getDocs } = window.fs;
@@ -3941,10 +3978,9 @@ ${JSON.stringify(I)}
     }
     function enterQuiz() {
         appMode = "quiz";
-        // [수정5] 정답 세트는 실시간 동기화(onSnapshot) 대상이 아니라 1회성 로드다.
-        // 기존에는 한 번 읽은 뒤 다시 읽지 않아, 다른 기기에서 방금 만든 정답 세트가
-        // 이 기기에서는 새로고침 전까지 보이지 않았다. 진단 진입 때마다 다시 읽는다.
-        loadAnswerKeys(true);
+        // [수정14] 평소에는 실시간 구독(watchAnswerKeys)이 최신 상태를 유지한다.
+        // 구독이 끊겼거나 아직 못 붙은 경우에만 보조로 한 번 읽는다.
+        if (!_akUnsub || !_akLoaded) watchAnswerKeys();
         showGalleryScreen();
     }
     function showGalleryScreen() {
@@ -3966,16 +4002,50 @@ ${JSON.stringify(I)}
     }
 
     /* 진단 시작 (사진 선택) */
+    /* [수정14] 생성 직전에 서버를 한 번 더 확인한다.
+       두 사람이 거의 동시에 같은 사진을 열면, 실시간 구독이 붙기 전이나
+       구독 지연 사이에 양쪽 모두 '없음'으로 보고 중복 생성할 수 있다.
+       AI 호출은 비싸므로 시작 전에 문서 존재 여부만 싸게 확인한다. */
+    async function fetchAnswerKeyFresh(photoImage) {
+        const sig = sigOf(photoImage);
+        const docId = AK_PREFIX + sig;
+        try {
+            if (window.fs && window.fs.db && window.fs.doc && window.fs.getDoc) {
+                const { db, doc, getDoc } = window.fs;
+                const snap = await withTimeout(getDoc(doc(db, AK_COLL, docId)), 6000, "정답세트 확인");
+                if (snap && snap.exists && snap.exists()) {
+                    applyAnswerKeyDocs([{ _dbId: docId, ...snap.data() }, ...Object.values(answerKeys).map((a) => ({ _dbId: a.docId, sig: a.sig, photoId: a.photoId, analystCount: a.analystCount, builtAt: a.builtAt, usage: a.usage, itemsJson: JSON.stringify(a.items || []), rejectedCandsJson: JSON.stringify(a.rejectedCands || []) }))]);
+                    return getAnswerKey(photoImage);
+                }
+                return null;
+            }
+        } catch (e) { console.warn("정답세트 즉시 확인 실패(무시):", e); }
+        return getAnswerKey(photoImage);
+    }
+
     async function selectPhotoQuiz(src) {
         const cnt = analystsOf(src);
         if (cnt < quizMin()) { showToast(`분석자 ${quizMin()}명 이상 참여한 사진만 진단할 수 있습니다`); return; }
 
         let ak = getAnswerKey(src);
         if (!ak) {
+            // 다른 기기가 방금 만들었을 수 있으니 서버를 한 번 더 본다.
+            busyShow("🔎 정답 세트 확인", ["서버 확인"]);
+            ak = await fetchAnswerKeyFresh(src);
+            busyHide();
+        }
+        if (!ak) {
             const ok = await customConfirm(
                 "이 사진의 <b>정답 세트</b>가 아직 없습니다.<br>" +
                 "지금 AI가 " + cnt + "명의 지적 사항을 통합해<br>정답 세트를 만들까요? (10~30초)");
             if (!ok) return;
+            // 확인창을 띄운 사이에 다른 사람이 만들었을 수도 있다.
+            const again = await fetchAnswerKeyFresh(src);
+            if (again) {
+                showToast("✅ 다른 기기에서 방금 만든 정답 세트를 불러왔습니다");
+                ak = again;      // 생성하지 않고 그대로 진단으로 진행한다
+            }
+            if (!ak) {
             busyShow(`🎯 정답 세트 생성 · 분석자 ${cnt}명`, AK_STEPS);
             try {
                 ak = await buildAnswerKey(src, busyStep);
@@ -3989,6 +4059,7 @@ ${JSON.stringify(I)}
                 console.error(e);
                 showToast("❌ 정답 세트 생성 실패: " + (e.message || e));
                 return;
+            }
             }
         }
 
