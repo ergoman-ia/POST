@@ -1427,6 +1427,21 @@
         if (!res.ok) { const t = await res.text().catch(() => ""); throw new Error("REST 저장 HTTP " + res.status + " " + t.slice(0, 120)); }
         return res.json();
     }
+    // 문서의 일부 필드만 갱신한다(updateMask). REST 폴백용.
+    async function restPatchDoc(coll, docId, fields) {
+        const cfg = window.FB || {};
+        const token = await restAuthToken();
+        const mask = Object.keys(fields).map((k) => "updateMask.fieldPaths=" + encodeURIComponent(k)).join("&");
+        const url = `https://firestore.googleapis.com/v1/projects/${cfg.projectId}/databases/(default)/documents/${coll}/${docId}?key=${encodeURIComponent(cfg.apiKey)}&${mask}`;
+        const res = await withTimeout(fetch(url, {
+            method: "PATCH", cache: "no-store",
+            headers: { "Content-Type": "application/json", ...(token ? { Authorization: "Bearer " + token } : {}) },
+            body: JSON.stringify({ fields: toRestFields(fields) })
+        }), 9000, "REST 갱신");
+        if (!res.ok) { const t = await res.text().catch(() => ""); throw new Error("REST 갱신 HTTP " + res.status + " " + t.slice(0, 120)); }
+        return await res.json();
+    }
+
     async function restDeleteDoc(coll, docId) {
         const cfg = window.FB || {};
         const token = await restAuthToken();
@@ -3439,7 +3454,14 @@ ${JSON.stringify(issuesArr)}
                 let hit = clusters.find((c) => c.norm === n || dice(c.norm, n) >= 0.62);
                 if (!hit) { hit = { title: t, norm: n, people: new Map(), texts: new Set() }; clusters.push(hit); }
                 const pk = r.pkey || ("anon:" + r.dbId);
-                if (!hit.people.has(pk)) hit.people.set(pk, { pkey: pk, name: r.name || "익명", org: r.org || "", text: t, timestamp: r.timestamp });
+                if (!hit.people.has(pk)) hit.people.set(pk, {
+                    pkey: pk, name: r.name || "익명", org: r.org || "",
+                    text: t,
+                    // [수정13] 분석자로 등록할 때 이 사람이 찾은 위험요인 '전부'를 넣기 위해
+                    // 승격 대상 한 줄만이 아니라 응시 입력 전체를 함께 넘긴다.
+                    inputs: (r.inputs || []).slice(),
+                    timestamp: r.timestamp
+                });
                 hit.texts.add(t);
             });
         });
@@ -4585,6 +4607,7 @@ ${JSON.stringify(I)}
        (이름+소속+사진 기준) 기존 문서에 지적을 합쳐 한 건으로 유지한다. */
     async function registerQuizAnalysts(photoImage, people, text) {
         let added = 0, merged = 0;
+        const failed = [], written = [];
         for (const p of (people || [])) {
             /* [수정10] 이름이 없어도 건너뛰지 않는다.
                기존에는 익명 응시자를 통째로 skip 해서, 진단 화면에 이름칸이 없던
@@ -4594,19 +4617,24 @@ ${JSON.stringify(I)}
             let org = String(p.org || "").trim();
             if (!name || /^(익명|무명|미입력|없음)$/.test(name)) { name = "무명"; if (!org) org = "무소속"; }
             if (!org) org = "무소속";
-            const mine = String(p.text || text || "").trim();
-            if (!mine) continue;
+            /* [수정13] 승격된 항목 한 줄만이 아니라, 이 응시자가 찾아낸 위험요인 전부를 등록한다.
+               진단자 = 분석자로 편입하는 것이므로 그 사람의 지적 전체가 DB에 남아야 한다.
+               ※ 이 기록들은 모두 1회차(pristine) 응시 — 정답 세트를 보기 전 입력이라
+                  독립적인 관찰로 취급해도 안전하다. */
+            const mineList = uniqStr([].concat(p.inputs || [], p.text || text || ""));
+            if (mineList.length === 0) continue;
             try {
                 const found = await findServerDups(name, org, photoImage);
                 const list = (found.list || []).slice().sort((a, b) => (a.timestamp || 0) - (b.timestamp || 0));
                 let basePins = [];
                 list.forEach((m) => { basePins = basePins.concat(normalizePins(m)); });
 
-                // 같은 뜻을 이미 적어 둔 사람은 중복 추가하지 않는다.
-                const dup = basePins.some((pin) => normText(pin.text) === normText(mine));
-                if (dup) { merged++; continue; }
+                // 이미 적어 둔 것과 겹치는 지적은 빼고 새로운 것만 더한다.
+                const have = new Set(basePins.map((pin) => normText(pin.text)));
+                const fresh = mineList.filter((t) => { const k = normText(t); if (!k || have.has(k)) return false; have.add(k); return true; });
+                if (fresh.length === 0) { merged++; continue; }
 
-                const pins = basePins.concat([{ id: Date.now() + added, x: 50, y: 50, text: mine, listOnly: true }]);
+                const pins = basePins.concat(fresh.map((t, k) => ({ id: Date.now() + added * 100 + k, x: 50, y: 50, text: t, listOnly: true })));
                 const keeper = list[0] || null;
                 const entry = {
                     id: (keeper && keeper.id) || Date.now(),
@@ -4617,13 +4645,62 @@ ${JSON.stringify(I)}
                     photo: photoImage,
                     from: "quiz"                    // 진단에서 편입된 기록임을 표시
                 };
-                await persistEntry(entry, keeper ? keeper.dbId : null);
+                const dbId = await persistEntry(entry, keeper ? keeper.dbId : null);
+                written.push({ dbId, ...entry });
                 if (keeper) merged++; else added++;
             } catch (e) {
                 console.warn("분석자 등록 실패:", name, e);
+                failed.push(name + (e && e.message ? " (" + e.message + ")" : ""));
             }
         }
-        return { added, merged };
+        return { added, merged, failed, written };
+    }
+
+
+    /* [수정12] 판정이 끝난 신규 지적을 응시 기록에서 자동으로 걷어낸다.
+       · 승격(⭕)이든 기각(❌)이든 판정이 끝나면 그 extras 는 역할이 끝난다.
+       · 같은 기록 안의 '아직 판정하지 않은' 다른 지적은 남겨 둔다.
+       · 남은 지적이 하나도 없는 기록은 문서째 삭제한다.
+       관리자가 '🗑 기록 삭제'를 따로 누르지 않아도 정리되도록 하기 위함. */
+    async function pruneJudgedExtras(sig, titles) {
+        const keys = (titles || []).map(normText).filter(Boolean);
+        if (keys.length === 0) return { updated: 0, removed: 0 };
+        const isJudged = (t) => {
+            const n = normText(t);
+            return keys.some((k) => k === n || dice(k, n) >= 0.62);
+        };
+
+        let updated = 0, removed = 0;
+        const rows = quizResults.filter((r) => r.sig === sig);
+        for (const r of rows) {
+            if (!r.dbId) continue;
+            const left = (r.extras || []).filter((t) => !isJudged(t));
+            if (left.length === (r.extras || []).length) continue;   // 바뀐 게 없음
+            try {
+                if (left.length === 0) {
+                    // 남은 신규 지적이 없다 → 이 응시 기록은 더 볼 일이 없다
+                    if (window.__authReady && window.fs && window.fs.db && window.fs.deleteDoc && window.fs.doc) {
+                        const { db, doc, deleteDoc } = window.fs;
+                        await withTimeout(deleteDoc(doc(db, QR_COLL, r.dbId)), 8000, "응시기록 삭제");
+                    } else {
+                        await restDeleteDoc(QR_COLL, r.dbId);
+                    }
+                    quizResults = quizResults.filter((x) => x.dbId !== r.dbId);
+                    removed++;
+                } else {
+                    // 일부만 정리 → extrasJson 만 갱신
+                    if (window.__authReady && window.fs && window.fs.db && window.fs.updateDoc && window.fs.doc) {
+                        const { db, doc, updateDoc } = window.fs;
+                        await withTimeout(updateDoc(doc(db, QR_COLL, r.dbId), { extrasJson: JSON.stringify(left) }), 8000, "응시기록 갱신");
+                    } else {
+                        await restPatchDoc(QR_COLL, r.dbId, { extrasJson: JSON.stringify(left) });
+                    }
+                    r.extras = left;
+                    updated++;
+                }
+            } catch (e) { console.warn("응시기록 정리 실패:", r.dbId, e); }
+        }
+        return { updated, removed };
     }
 
     async function saveMinorityVerdicts() {
@@ -4684,29 +4761,61 @@ ${JSON.stringify(I)}
         const photo = photoList.find((p) => sigOf(p.image) === _mnSig);
         const steps = ["정답 세트 저장"];
         if (approve.length && photo) steps.push("응시자를 분석자로 등록");
+        if (approve.length + reject.length) steps.push("판정 끝난 응시기록 정리");
         busyShow("💾 판정 저장", steps);
         try {
             busyStep(0);
             await persistAnswerKey(ak);
 
-            let reg = { added: 0, merged: 0 };
+            let reg = { added: 0, merged: 0, failed: [] };
             if (approve.length && photo) {
                 busyStep(1);
-                for (const c of approve) {
-                    const r = await registerQuizAnalysts(photo.image, c.people, c.title);
+                /* [수정13] 한 사람이 여러 후보에 걸쳐 있어도 등록은 한 번만 한다.
+                   사람 단위로 합치고, 그 사람의 응시 입력 전체를 모아 넘긴다. */
+                const byPerson = new Map();
+                approve.forEach((c) => (c.people || []).forEach((p) => {
+                    const k = p.pkey || (p.name + "|" + p.org);
+                    const cur = byPerson.get(k);
+                    if (cur) cur.inputs = uniqStr([].concat(cur.inputs || [], p.inputs || [], p.text || ""));
+                    else byPerson.set(k, { ...p, inputs: uniqStr([].concat(p.inputs || [], p.text || "")) });
+                }));
+                {
+                    const r = await registerQuizAnalysts(photo.image, [...byPerson.values()]);
                     reg.added += r.added; reg.merged += r.merged;
+                    reg.failed = reg.failed.concat(r.failed || []);
+                    /* [수정12] 서버에 쓴 기록을 로컬 목록에도 즉시 반영한다.
+                       실시간 리스너(onSnapshot)가 살아 있으면 알아서 들어오지만,
+                       REST 폴백 모드에서는 리스너가 없어 '분석 결과 관리' 표에
+                       새 분석자가 영영 나타나지 않았다. */
+                    (r.written || []).forEach((w) => {
+                        entryList = entryList.filter((x) => x.dbId !== w.dbId);
+                        entryList.push(w);
+                    });
                 }
+                entryList.sort((a, b) => (b.timestamp || 0) - (a.timestamp || 0));
             }
+
+            // [수정12] 판정이 끝난 신규 지적은 응시 기록에서 자동으로 걷어낸다.
+            let pruned = { updated: 0, removed: 0 };
+            const judgedTitles = approve.concat(reject).map((c) => c.title);
+            if (judgedTitles.length) {
+                busyStep(2);
+                pruned = await pruneJudgedExtras(_mnSig, judgedTitles);
+            }
+
             busyHide();
             closeMinorityModal();
             renderAnswerKeyPanel();
             renderQuizInflowPanel();
+            renderTable();                 // 분석 결과 관리 표를 즉시 다시 그린다
 
             let msg = `💾 저장 완료`;
             if (approve.length) msg += ` · 정답 세트에 ${approve.length}건 추가`;
             if (reject.length) msg += ` · ${reject.length}건 기각`;
-            if (reg.added || reg.merged) msg += ` · 분석자 등록 ${reg.added}명(기존 기록 병합 ${reg.merged}건)`;
+            if (reg.added || reg.merged) msg += ` · 분석자 ${reg.added}명 등록(기존 병합 ${reg.merged}건)`;
+            if (pruned.updated || pruned.removed) msg += ` · 응시기록 정리 ${pruned.updated + pruned.removed}건`;
             showToast(msg);
+            if (reg.failed.length) showToast("⚠️ 분석자 등록 실패 " + reg.failed.length + "건: " + reg.failed[0]);
         } catch (e) {
             busyHide();
             showToast("❌ 저장 실패: " + (e.message || e));
