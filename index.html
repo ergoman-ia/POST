@@ -1747,14 +1747,19 @@
         let visible = photoList.filter((p) => !p.isHidden);
 
         if (appMode === "quiz") {
-            /* [수정14] 정답 세트를 아직 못 읽었으면 '없음'으로 단정하지 않는다.
-               예전에는 로딩 중에도 '🤖 정답세트 생성'으로 보여서,
-               다른 기기가 이미 만들어 둔 것을 또 만드는 일이 생겼다. */
+            /* [수정14·15] 정답 세트를 아직 못 읽었으면 '없음'으로 단정하지 않는다.
+               단, 캐시로 채워졌으면(_akLoaded) 기다리지 않고 바로 그린다.
+               서버 최신본이 아직이면(_akFresh=false) 위에 작은 표시만 얹는다. */
             if (!_akLoaded) {
                 wrap.innerHTML = `<div class="empty-state">🔄 정답 세트를 확인하는 중입니다…<br>
                     <span style="font-size:.8rem; color:var(--faint);">잠시만 기다려 주세요.</span></div>`;
                 return;
             }
+            const sub = document.getElementById("gallerySub");
+            if (sub) sub.innerHTML = _akFresh
+                ? `분석자 ${quizMin()}명 이상이 참여해 정답 세트를 만들 수 있는 사진만 표시됩니다.`
+                : `분석자 ${quizMin()}명 이상이 참여한 사진만 표시됩니다.
+                   <span style="color:var(--warn);">· 🔄 최신 상태 확인 중</span>`;
             // 수준 진단: 분석자가 충분히 참여한 사진만 (정답 세트를 만들 수 있는 사진)
             const mn = quizMin();
             visible = visible.filter((p) => cntOf(p) >= mn || !!getAnswerKey(p.image));
@@ -3235,7 +3240,34 @@ ${JSON.stringify(issuesArr)}
        (SDK 타임아웃 9초 → REST 인증 → 재조회) 1분 가까이 걸렸고,
        그 사이 '생성하세요'로 보여서 같은 정답 세트를 또 만드는 일이 생겼다. */
     let _akUnsub = null;
+    let _akFresh = false;              // 서버에서 최신본을 받았는지
+    const LS_AK_CACHE = "ak_cache_v1";
+
+    /* [수정15] 정답 세트 로컬 캐시.
+       onSnapshot 첫 응답이 늦어(settings 컬렉션 전체 + itemsJson) 화면이
+       6초쯤 '확인 중'에 머물렀다. 지난번 받아 둔 내용을 즉시 그려 주고,
+       서버 응답이 오면 조용히 덮어쓴다.
+       ※ 캐시가 낡아 '없음'으로 보이더라도, 실제 생성 직전에는 항상
+          fetchAnswerKeyFresh() 로 서버를 다시 보므로 중복 생성은 막힌다. */
+    function hydrateAnswerKeys() {
+        try {
+            const raw = localStorage.getItem(LS_AK_CACHE);
+            if (!raw) return false;
+            const obj = JSON.parse(raw);
+            if (!obj || typeof obj !== "object") return false;
+            answerKeys = obj;
+            _akLoaded = true;
+            _akFresh = false;
+            return true;
+        } catch (_) { return false; }
+    }
+    function cacheAnswerKeys() {
+        try { localStorage.setItem(LS_AK_CACHE, JSON.stringify(answerKeys)); }
+        catch (e) { console.warn("정답세트 캐시 저장 생략:", e && e.name); }
+    }
+
     function watchAnswerKeys() {
+        hydrateAnswerKeys();           // 캐시가 있으면 즉시 화면부터 채운다
         if (!fsReady()) { loadAnswerKeys(true); return; }
         try { if (_akUnsub) _akUnsub(); } catch (_) { }
         const { db, collection, onSnapshot } = window.fs;
@@ -3252,7 +3284,7 @@ ${JSON.stringify(issuesArr)}
             loadAnswerKeys(true);
         }
         // 실시간 구독이 막히는 환경 대비 안전망
-        setTimeout(() => { if (!_akLoaded) loadAnswerKeys(true); }, 4000);
+        setTimeout(() => { if (!_akFresh) loadAnswerKeys(true); }, 2500);
     }
 
     function applyAnswerKeyDocs(docs) {
@@ -3280,6 +3312,8 @@ ${JSON.stringify(issuesArr)}
             });
             answerKeys = map;
             _akLoaded = true;
+            _akFresh = true;
+            cacheAnswerKeys();
             renderAnswerKeyPanel();
             if (appMode === "quiz") renderUserGallery();
     }
