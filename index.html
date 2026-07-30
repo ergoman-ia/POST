@@ -3,7 +3,10 @@
 
 <head>
     <meta charset="utf-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <!-- [수정20] 확대를 막지 않는다. 현장 사진에서 위험요인을 찾는 앱인데
+         핀치 줌을 잠가 두면 스마트폰 사용자는 작은 대상을 볼 수가 없다.
+         (viewport-fit=cover 는 노치 있는 기기에서 상단바가 가려지는 것을 막는다) -->
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
     <title>현장 위험요인 찾기 · 수준진단</title>
 
     <link rel="preconnect" href="https://cdn.jsdelivr.net">
@@ -568,7 +571,9 @@
     <!-- ===== 상단 바 ===== -->
     <header class="topbar">
         <div class="topbar-inner">
-            <div class="brand" id="brandTitle"><span class="dot"></span> <span id="brandText">현장 위험요인 찾기 · 수준진단</span></div>
+            <div class="brand" id="brandTitle"><span class="dot"></span> <span id="brandText">현장 위험요인 찾기 · 수준진단</span>
+                <span id="syncChip" style="margin-left:8px; font-size:.66rem; font-weight:700; letter-spacing:-.2px; white-space:nowrap;"
+                    title="서버 동기화 상태">● 실시간</span></div>
             <div class="seg" id="modeSeg">
                 <button class="user active" data-mode="user">👤 분석자</button>
                 <button class="admin" data-mode="admin">🔐 관리자</button>
@@ -816,7 +821,9 @@
                 </div>
 
                 <div class="count-bar" id="countBar">조회 건수: <b>0</b>개</div>
-                <button class="btn btn-primary btn-block" style="margin-top:12px;" onclick="App.printAll()">🖨️ 선택 항목 포스트잇 출력</button>
+                <button class="btn btn-primary btn-block" style="margin-top:12px;" onclick="App.printPhotoPostits()"
+                    title="표에서 사진 썸네일을 눌러 사진을 고르면, 그 사진에 참여한 사람 전원을 한 사람당 한 장으로 인쇄합니다.">🖨️ 이 사진 참여자 전원 포스트잇 출력</button>
+                <button class="btn btn-ghost btn-block" style="margin-top:8px;" onclick="App.printAll()">🖨️ 선택 항목만 포스트잇 출력</button>
             </div>
         </section>
     </main>
@@ -934,6 +941,8 @@
     let activePinId = null;      // 핀 시트 편집 대상
     let filteredPhoto = null;    // 관리자 사진 필터
     let savedReport = null;      // 재그룹 결과
+    let reportPhoto = null;      // [수정20] 보고서 대상 현장 사진
+    let reportPeople = 0;        // [수정20] 보고서에 반영된 참여 인원(사람 수)
     let analyzedNames = "";
     let _lastDataSync = 0;       // 마지막으로 inspections 데이터가 도착한 시각(실시간/REST 공통)
     let _peerPollTimer = null;   // 작업 화면에서 다른 분석자 결과를 주기적으로 새로고침하는 타이머
@@ -1776,18 +1785,18 @@
                 return;
             }
         } else {
-            // 정답 세트가 '진단 전용'으로 확정된 사진은 더 이상 입력받지 않는다(정답 유출로 인한 데이터 오염 방지)
-            const before = visible.length;
-            visible = visible.filter((p) => !isQuizOnly(p.image));
-            const lockedOut = before - visible.length;
+            /* [수정20] '진단 전용(입력 마감)'으로 사진을 감추던 필터를 없앴다.
+               원래 이유는 '정답 유출로 인한 데이터 오염 방지'였는데,
+               ① 채점 결과가 더 이상 정답을 보여주지 않고(수정17)
+               ② 진단 입력도 똑같이 정답 세트의 재료가 되므로(수정19)
+               오염될 경로가 사라졌다. 남아 있으면 수집 경로 하나를 닫을 뿐이다.
+               이 앱의 목적은 한 사진에 최대한 많은 사람의 관찰을 모으는 것이다. */
+
             // 의견(분석)을 올린 분석자 수가 적은 사진이 먼저(왼쪽/위쪽) 나오도록 정렬
             // 수가 같으면 기존 관리자 지정 순서(effOrder)를 유지 (sort는 안정 정렬)
             visible.sort((a, b) => cntOf(a) - cntOf(b));
             if (visible.length === 0) {
-                wrap.innerHTML = lockedOut > 0
-                    ? `<div class="empty-state">입력을 받는 사진이 지금은 없습니다.<br>
-                        정답 세트가 확정된 <b>${lockedOut}장</b>은 '나의 안전보건 수준 진단'에서 이용할 수 있습니다.</div>`
-                    : `<div class="empty-state">아직 등록된 점검 사진이 없습니다.<br>관리자가 사진을 추가하면 여기에 표시됩니다.</div>`;
+                wrap.innerHTML = `<div class="empty-state">아직 등록된 점검 사진이 없습니다.<br>관리자가 사진을 추가하면 여기에 표시됩니다.</div>`;
                 return;
             }
         }
@@ -2528,7 +2537,33 @@
     }
 
     async function deletePhoto(id) {
-        if (!await customConfirm("이 사진을 삭제할까요?<br>삭제 후 복구할 수 없습니다.")) return;
+        /* [수정20] 무엇이 사라지고 무엇이 남는지 정확히 알려준다.
+           사진 문서만 지워지고, 그 사진에 쌓인 위험요인·정답 세트·응시 기록은
+           서버에 그대로 남는다. 다만 목록에서 사진이 사라지므로 관리자 화면에서
+           그 자료에 접근할 길이 없어진다 — 사실상 열람 불가 상태가 된다. */
+        const p = photoList.find((x) => x.id === id);
+        const img = p ? p.image : null;
+        const entries = img ? entryList.filter((it) => it.photo === img) : [];
+        const people = img ? participantsOf(img) : 0;
+        const ak = img ? getAnswerKey(img) : null;
+        const detail = img
+            ? `<div style="text-align:left; background:#fff5f5; border:1px solid var(--danger); border-radius:8px; padding:10px 12px; margin:10px 0; font-size:.84rem; line-height:1.7;">
+                 <b style="color:var(--danger)">이 사진에 쌓인 자료</b><br>
+                 · 참여자 <b>${people}명</b> · 위험요인 입력 <b>${entries.length}건</b>
+                 ${ak ? `<br>· 정답 세트 <b>${ak.items.length}개 항목</b>` : ""}
+               </div>
+               <div style="text-align:left; font-size:.83rem; line-height:1.7;">
+                 위 자료는 <b>서버에서 지워지지 않습니다.</b> 하지만 사진이 목록에서 사라지면
+                 <b style="color:var(--danger)">관리자 화면에서 이 자료를 다시 볼 수 없습니다.</b>
+                 포스트잇·보고서 출력도 불가능해집니다.<br>
+                 <span style="color:var(--muted);">
+                 · 나중에 <u>똑같은 사진 파일</u>을 다시 올리면 자료가 다시 연결됩니다.<br>
+                 · 지우기 전에 <b>포스트잇 출력</b>이나 <b>재그룹 보고서 저장</b>으로 남겨 두시길 권합니다.</span>
+               </div>`
+            : "";
+        if (!await customConfirm(
+            `이 사진을 목록에서 삭제할까요?${detail}
+             <div style="margin-top:8px; font-size:.82rem; color:var(--muted);">삭제 후 되돌릴 수 없습니다.</div>`)) return;
         try {
             const { db, doc, deleteDoc } = window.fs;
             await deleteDoc(doc(db, "site_photos", id));
@@ -2568,7 +2603,7 @@
             tbody.innerHTML = rows.map((it) => {
                 const selected = it.photo === filteredPhoto;
                 return `<tr>
-                    <td style="text-align:center;"><input type="checkbox" class="row-check" data-id="${it.id}"></td>
+                    <td style="text-align:center;"><input type="checkbox" class="row-check" data-id="${esc(it.dbId || it.id)}"></td>
                     <td>${new Date(it.timestamp).toLocaleString("ko-KR", { dateStyle: "short", timeStyle: "short" })}</td>
                     <td>${esc(it.name)}${isQuizEntry(it)
                         ? ` <span style="display:inline-block; background:#f4f0ff; color:var(--admin); border:1px solid var(--admin); border-radius:6px; padding:1px 5px; font-size:.66rem; font-weight:700; vertical-align:middle;" title="수준진단 응시로 들어온 자료입니다. 정답 세트 생성에는 분석자 입력과 똑같이 쓰입니다.">진단</span>`
@@ -2578,12 +2613,12 @@
                         <img src="${it.photo}" class="thumb-img ${selected ? "filtered" : ""}" data-img="${esc(it.photo)}" title="같은 사진끼리 모아보기">
                     </td>
                     <td>${(it.issues || []).map((s) => esc(s)).join("<br>")}</td>
-                    <td><button class="icon-btn" data-del="${it.id}" title="삭제">⛔</button></td>
+                    <td><button class="icon-btn" data-del="${esc(it.dbId || it.id)}" title="삭제">⛔</button></td>
                 </tr>`;
             }).join("");
             tbody.querySelectorAll(".row-check").forEach((c) => c.addEventListener("change", updateCounter));
             tbody.querySelectorAll(".thumb-img").forEach((im) => im.addEventListener("click", () => filterByPhoto(im.dataset.img)));
-            tbody.querySelectorAll("[data-del]").forEach((b) => b.addEventListener("click", () => deleteItem(Number(b.dataset.del))));
+            tbody.querySelectorAll("[data-del]").forEach((b) => b.addEventListener("click", () => deleteItem(b.dataset.del)));
         }
         updateCounter();
         renderFilterChip();
@@ -2608,8 +2643,7 @@
 
     // 선택한 행이 '정답 세트'로 쓸 수 있는 조합인지 안내한다(막지는 않는다).
     function selectionCtx() {
-        const ids = Array.from(document.querySelectorAll(".row-check:checked")).map((c) => Number(c.dataset.id));
-        const sel = entryList.filter((it) => ids.includes(it.id));
+        const sel = entriesByKeys(checkedKeys());
         const photos = [...new Set(sel.map((s) => s.photo))];
         const photo = photos.length === 1 ? photos[0] : null;
         const count = photo ? analystsOf(photo) : 0;
@@ -2629,6 +2663,18 @@
         }
     }
 
+    /* [수정20] 선택한 행을 되찾는다.
+       예전에는 내부 id 필드(=Date.now())로 찾았는데, 같은 밀리초에 만들어진
+       문서끼리 id 가 겹치면 포스트잇이 엉뚱한 사람 것까지 인쇄되고
+       삭제가 다른 문서를 지웠다. Firestore 문서 ID(dbId)는 절대 겹치지 않는다. */
+    function checkedKeys() {
+        return Array.from(document.querySelectorAll(".row-check:checked")).map((c) => String(c.dataset.id));
+    }
+    function entriesByKeys(keys) {
+        const set = new Set(keys.map(String));
+        return entryList.filter((it) => set.has(String(it.dbId || it.id)));
+    }
+
     function selectAll(bool) {
         document.querySelectorAll(".row-check").forEach((c) => (c.checked = bool));
         updateCounter();
@@ -2641,9 +2687,9 @@
     }
     function clearFilter() { filteredPhoto = null; renderTable(); }
 
-    async function deleteItem(id) {
+    async function deleteItem(key) {
         if (!await customConfirm("이 항목을 삭제할까요?<br>복구할 수 없습니다.")) return;
-        const target = entryList.find((it) => it.id === id);
+        const target = entryList.find((it) => String(it.dbId || it.id) === String(key));
         if (!target || !target.dbId) { showToast("항목을 찾을 수 없습니다"); return; }
         try {
             const { db, doc, deleteDoc } = window.fs;
@@ -2652,12 +2698,32 @@
         } catch (e) { showToast("삭제 실패: " + e.message); }
     }
 
-    /* 포스트잇 인쇄 */
-    function printAll() {
-        const ids = Array.from(document.querySelectorAll(".row-check:checked")).map((c) => Number(c.dataset.id));
-        if (ids.length === 0) { showToast("출력할 항목을 선택하세요"); return; }
-        const targets = entryList.filter((i) => ids.includes(i.id));
-        document.getElementById("printLayer").innerHTML = targets.map((e) => `
+    /* [수정20] 이미지 한 장의 참여자 전원을 사람 단위로 묶어 인쇄한다.
+       · 이 앱의 산출물은 '현장 사진 1장 + 그 사진에 대한 모든 지적'이다.
+         분석자로 참여했는지 진단으로 참여했는지는 출력에서 구분하지 않는다.
+       · 한 사람이 두 경로로 참여했으면 문서는 둘이지만 포스트잇은 한 장이다.
+         (DB 는 출처를 남기기 위해 나눠 두고, 출력에서만 합친다) */
+    function postitCards(entries) {
+        const byPerson = new Map();
+        (entries || []).forEach((e) => {
+            const key = personKey(e) || ("doc:" + (e.dbId || e.id));
+            const cur = byPerson.get(key);
+            if (cur) {
+                cur.issues = uniqStr([].concat(cur.issues, e.issues || []));
+                if ((e.timestamp || 0) > (cur.timestamp || 0)) cur.timestamp = e.timestamp;
+            } else {
+                byPerson.set(key, {
+                    name: e.name || "무명", org: e.org || "",
+                    photo: e.photo, timestamp: e.timestamp || 0,
+                    issues: uniqStr(e.issues || [])
+                });
+            }
+        });
+        return [...byPerson.values()].sort((a, b) => (a.timestamp || 0) - (b.timestamp || 0));
+    }
+
+    function renderPostits(cards) {
+        document.getElementById("printLayer").innerHTML = cards.map((e) => `
             <div class="post-it">
                 <h3>${esc(e.name)} (${esc(e.org || "")})</h3>
                 <div class="body">${(e.issues || []).map((s) => `· ${esc(s)}`).join("<br>")}</div>
@@ -2667,14 +2733,36 @@
         window.print();
     }
 
+    // 지금 필터된 사진의 참여자 전원을 한 번에 인쇄한다(체크 없이).
+    function printPhotoPostits() {
+        if (!filteredPhoto) { showToast("먼저 표에서 사진 썸네일을 눌러 사진을 선택하세요"); return; }
+        const cards = postitCards(entryList.filter((it) => it.photo === filteredPhoto));
+        if (cards.length === 0) { showToast("이 사진에 등록된 내용이 없습니다"); return; }
+        showToast(`🖨 참여자 ${cards.length}명의 포스트잇을 인쇄합니다`);
+        renderPostits(cards);
+    }
+
+    /* 포스트잇 인쇄 */
+    function printAll() {
+        const targets = entriesByKeys(checkedKeys());
+        if (targets.length === 0) { showToast("출력할 항목을 선택하세요"); return; }
+        renderPostits(postitCards(targets));
+    }
+
     /* =========================================================
        AI 분석 (Gemini) — 프롬프트/카테고리 유지
        ========================================================= */
     async function analyze() {
-        const ids = Array.from(document.querySelectorAll(".row-check:checked")).map((c) => Number(c.dataset.id));
-        const selected = entryList.filter((it) => ids.includes(it.id));
+        const selected = entriesByKeys(checkedKeys());
         if (selected.length < 2) { showToast("⚠️ 최소 2개 이상 선택하세요"); return; }
         _akCtx = selectionCtx();   // 이 분석 결과를 정답 세트로 쓸 수 있는지 기록
+        /* [수정20] 보고서의 대상이 어느 현장 사진인지 함께 남긴다.
+           지금까지 산출물에 정작 사진이 없어, 표만 보고는 어느 현장인지 알 수 없었다. */
+        {
+            const ps = [...new Set(selected.map((it) => it.photo))];
+            reportPhoto = (ps.length === 1) ? ps[0] : null;
+            reportPeople = postitCards(selected).length;
+        }
 
         analyzedNames = [...new Set(selected.map((it) => it.name))].join(", ") + "님께서 찾으신 문제점입니다.";
         document.getElementById("modalTitle").textContent = "🛡️ AI 안전 전문가 분석 결과";
@@ -2691,8 +2779,11 @@
 
         try {
             let flattened = [];
+            /* [수정20] 구분자 규칙을 정답 세트 생성(buildAnswerKey)과 맞춘다.
+               예전에는 여기만 쉼표로 잘라, 세미콜론·줄바꿈으로 여러 개를 적은 입력이
+               보고서에서는 한 덩어리, 정답 세트에서는 여러 개로 갈렸다. */
             selected.forEach((s) => (s.issues || []).forEach((txt) => {
-                txt.split(",").map((t) => t.trim()).filter(Boolean).forEach((t) => flattened.push({ text: t, name: s.name }));
+                String(txt).split(/[,;\n]/).map((t) => t.trim()).filter(Boolean).forEach((t) => flattened.push({ text: t, name: s.name }));
             }));
             const categories = getCategories();
             const grouped = await analyzeWithGemini(flattened, categories);
@@ -2947,7 +3038,10 @@ ${JSON.stringify(issuesArr)}
         document.getElementById("saveAsKeyBtn").style.display = "none";
         document.getElementById("analysisModal").classList.add("show");
         const header = `<div class="print-report"><div style="text-align:center; margin-bottom:18px; padding-bottom:10px; border-bottom:2px solid #333;">
-                <h1 style="font-size:22pt;">선택 항목 문제점 그룹화 결과</h1>
+                <h1 style="font-size:22pt;">현장 위험요인 그룹화 보고서</h1>
+                ${reportPhoto ? `<div style="margin:10px auto 6px; max-width:460px;">
+                    <img src="${reportPhoto}" style="width:100%; max-height:260px; object-fit:contain; border:1px solid #bbb; border-radius:8px;"></div>
+                  <p style="margin:2px 0 0; font-size:.85rem; color:#555;">참여 <b>${reportPeople}</b>명</p>` : ""}
                 <p style="margin-top:8px; color:#555;">${esc(analyzedNames)}</p></div>`;
         const table = `<table style="font-size:.9rem;">
                 <thead><tr>
@@ -3141,6 +3235,7 @@ ${JSON.stringify(issuesArr)}
     // 사진 이용 상태 — 기본값은 언제나 "both"(계속 수집 + 진단).
     // "quiz"(진단 전용 = 입력 마감)는 관리자가 명시적으로 선택했을 때만 적용된다.
     function usageOf(ak) { return (ak && ak.usage === "quiz") ? "quiz" : "both"; }
+    // [수정20] 표시용 구분(진단 중심 / 수집 중)일 뿐, 입력을 막는 데는 쓰지 않는다.
     function isQuizOnly(photoImage) {
         const ak = getAnswerKey(photoImage);
         return !!ak && usageOf(ak) === "quiz";
@@ -3337,41 +3432,93 @@ ${JSON.stringify(issuesArr)}
        해결: 화면이 보이는 동안 주기적으로 상태를 점검해, 구독이 없거나 오래
              소식이 없으면 다시 구독하거나 최소한 최신본을 한 번 읽어 온다.
        ========================================================= */
-    const SYNC_CHECK_MS = 5000;    // 점검 주기
-    const SYNC_STALE_MS = 12000;   // 이 시간 넘게 소식 없으면 채널이 죽은 것으로 본다
+    const SYNC_CHECK_MS = 2500;    // 변경 확인 주기 (읽는 건 수십 바이트짜리 표시 문서 하나뿐)
+    const SYNC_STALE_MS = 8000;    // 이 시간 넘게 소식 없으면 실시간 채널이 죽은 것으로 본다
+    const DATA_MIN_GAP_MS = 30000; // 점검기록 전체 다시 읽기의 최소 간격
     let _syncTimer = null;
+    let _syncBusy = false;
+    let _lastDataPull = 0;
 
-    async function syncNow(reason) {
+    /* [수정20] 동기화 점검.
+       이전 판(수정16)은 점검이 걸릴 때마다 정답 세트 전체 + 점검기록 전체를
+       다시 읽었다. 점검기록에는 사진이 base64 로 통째로 들어 있어, 5초마다
+       수 MB 를 내려받는 셈이었다. 모바일에서 채널이 포화되어 정작 정답 세트
+       갱신이 밀렸다 — 실시간이 느려진 진짜 원인이다.
+       이제는 ① 초경량 표시 문서로 '바뀌었는지'만 묻고
+              ② 바뀌었을 때만 정답 세트를 읽으며
+              ③ 무거운 점검기록은 구독이 죽었을 때만, 그것도 30초에 한 번만 읽는다. */
+    async function syncNow(reason, opts) {
         if (!navigator.onLine) return;
-        console.log("[점검앱] 동기화 점검:", reason);
+        if (_syncBusy) return;
+        _syncBusy = true;
+        const force = !!(opts && opts.force);
         try {
-            if (fsReady() && !_akUnsub) watchAnswerKeys();   // 구독 자체를 되살린다
-            else await loadAnswerKeys(true);                 // 최소한 최신본은 가져온다
+            if (fsReady() && !_akUnsub) watchAnswerKeys();          // 구독 자체를 되살린다
+            else if (force || await answerKeyChanged()) {
+                console.log("[점검앱] 정답 세트 갱신 감지:", reason);
+                await loadAnswerKeys(true);
+            }
         } catch (e) { console.warn("정답세트 동기화 실패:", e); }
+
         try {
+            const now = Date.now();
             if (fsReady() && !_dataUnsub) watchData();
-            else await restLoadData();
+            else if ((force || !_dataUnsub) && (now - _lastDataPull) > DATA_MIN_GAP_MS) {
+                _lastDataPull = now;
+                await restLoadData();
+            }
         } catch (e) { console.warn("점검기록 동기화 실패:", e); }
+        finally { _syncBusy = false; }
+        renderSyncChip();
+    }
+
+    /* 지금 실시간인지 폴링인지 사용자가 볼 수 있게 표시한다.
+       "왜 늦지?" 를 추측하지 않아도 되도록 하는 것이 목적이다. */
+    function renderSyncChip() {
+        const el = document.getElementById("syncChip");
+        if (!el) return;
+        const live = !!_akUnsub && (Date.now() - _akLastSnap) < SYNC_STALE_MS * 3;
+        el.textContent = live ? "● 실시간" : "◌ 주기 확인";
+        el.title = live
+            ? "서버 변경이 즉시 반영됩니다."
+            : "이 브라우저에서 실시간 연결이 막혀 " + (SYNC_CHECK_MS / 1000) + "초마다 변경을 확인합니다.";
+        el.style.color = live ? "var(--success)" : "var(--warn)";
     }
 
     function startSyncWatchdog() {
         if (_syncTimer) return;
         _syncTimer = setInterval(() => {
             if (document.visibilityState !== "visible") return;
-            const now = Date.now();
-            const akStale = !_akUnsub || (now - _akLastSnap) > SYNC_STALE_MS;
-            const dataStale = !_dataUnsub || (now - _lastDataSync) > SYNC_STALE_MS;
-            if (akStale || dataStale) syncNow("워치독");
+            const stale = !_akUnsub || (Date.now() - _akLastSnap) > SYNC_STALE_MS;
+            if (stale) syncNow("주기 확인");
+            renderSyncChip();
         }, SYNC_CHECK_MS);
 
         // 네트워크가 돌아온 순간은 채널이 죽어 있을 확률이 가장 높다.
-        window.addEventListener("online", () => syncNow("online"));
+        window.addEventListener("online", () => syncNow("네트워크 복구", { force: true }));
+        // 모바일에서 Wi-Fi ↔ LTE 가 바뀌면 기존 연결은 거의 확실히 끊긴다.
+        try {
+            const c = navigator.connection;
+            if (c && c.addEventListener) c.addEventListener("change", () => syncNow("네트워크 전환", { force: true }));
+        } catch (_) { }
+        /* 화면을 만진 순간은 사용자가 결과를 기다리는 순간이다.
+           오래 쉬었다 돌아온 경우에만(주기보다 길게) 즉시 한 번 확인한다. */
+        let _lastTouchSync = 0;
+        const onTouch = () => {
+            const now = Date.now();
+            if (now - _lastTouchSync < SYNC_CHECK_MS) return;
+            _lastTouchSync = now;
+            if (!_akUnsub || (now - _akLastSnap) > SYNC_STALE_MS) syncNow("사용자 조작");
+        };
+        window.addEventListener("pointerdown", onTouch, { passive: true });
+        renderSyncChip();
     }
 
     function applyAnswerKeyDocs(docs) {
             const map = {};
             (docs || []).forEach((d) => {
                 const id = d._dbId || d.id || "";
+                if (id === AK_VER_DOC) { const rv = String(d.rev || ""); if (rv) _akRevSeen = rv; return; }
                 if (String(id).indexOf(AK_PREFIX) !== 0) return;
                 let items = [];
                 try { items = JSON.parse(d.itemsJson || "[]"); } catch (_) { items = []; }
@@ -3419,6 +3566,59 @@ ${JSON.stringify(issuesArr)}
         }
     }
 
+    /* =========================================================
+       [수정20] 정답 세트 '변경 감지' 전용 초경량 문서
+       ---------------------------------------------------------
+       왜: 실시간 구독이 막힌 환경에서는 주기적으로 다시 읽는 수밖에 없는데,
+           정답 세트 문서에는 itemsJson(전체 항목)이 들어 있어 무겁다.
+           몇 초마다 그걸 통째로 받으면 모바일에서 감당이 안 된다.
+       해결: 바뀔 때마다 rev 값만 올리는 아주 작은 문서를 하나 둔다.
+             폴링은 이 문서 하나(수십 바이트)만 읽고, 값이 달라졌을 때만
+             진짜 정답 세트를 읽는다. 덕분에 2~3초 간격 폴링도 부담이 없다.
+       ========================================================= */
+    const AK_VER_DOC = "_ak_rev";
+    let _akRevSeen = "";
+
+    async function bumpAnswerKeyRev() {
+        const rev = String(Date.now());
+        _akRevSeen = rev;
+        try {
+            if (window.__authReady && window.fs && window.fs.db) {
+                const { db, doc, setDoc } = window.fs;
+                await withTimeout(setDoc(doc(db, AK_COLL, AK_VER_DOC), { rev }), 6000, "변경표시 저장");
+                return;
+            }
+            await restSetDoc(AK_COLL, AK_VER_DOC, { rev });
+        } catch (e) { console.warn("정답세트 변경표시 갱신 실패(무시):", e); }
+    }
+
+    // 변경되었는지만 확인한다. true = 바뀜(전체를 다시 읽어야 함)
+    async function answerKeyChanged() {
+        try {
+            let rev = "";
+            if (window.fs && window.fs.db && window.fs.doc && window.fs.getDoc) {
+                const { db, doc, getDoc } = window.fs;
+                const snap = await withTimeout(getDoc(doc(db, AK_COLL, AK_VER_DOC)), 5000, "변경 확인");
+                rev = (snap && snap.exists && snap.exists()) ? String((snap.data() || {}).rev || "") : "";
+            } else {
+                const cfg = window.FB || {};
+                if (!cfg.projectId || !cfg.apiKey) return true;
+                const url = `https://firestore.googleapis.com/v1/projects/${cfg.projectId}/databases/(default)/documents/${AK_COLL}/${AK_VER_DOC}?key=${encodeURIComponent(cfg.apiKey)}`;
+                const res = await withTimeout(fetch(url), 5000, "변경 확인");
+                if (!res.ok) return res.status === 404 ? false : true;
+                const j = await res.json();
+                rev = String(((j.fields || {}).rev || {}).stringValue || "");
+            }
+            if (!rev) return false;               // 표시 문서가 아직 없으면 판단 보류
+            if (rev === _akRevSeen) return false; // 변화 없음 — 여기서 끝(수십 바이트)
+            _akRevSeen = rev;
+            return true;
+        } catch (e) {
+            console.warn("정답세트 변경 확인 실패:", e);
+            return false;
+        }
+    }
+
     async function persistAnswerKey(ak) {
         const data = {
             type: "answer_key",
@@ -3440,11 +3640,13 @@ ${JSON.stringify(issuesArr)}
                 const { db, doc, setDoc } = window.fs;
                 await withTimeout(setDoc(doc(db, AK_COLL, docId), data), 9000, "정답세트 저장");
                 answerKeys[ak.sig] = { ...ak, docId };
+                bumpAnswerKeyRev();
                 return;
             } catch (e) { console.warn("정답세트 SDK 저장 실패 → REST 시도:", e); }
         }
         await restSetDoc(AK_COLL, docId, data);
         answerKeys[ak.sig] = { ...ak, docId };
+        bumpAnswerKeyRev();
     }
 
     /* =========================================================
@@ -3671,11 +3873,13 @@ ${JSON.stringify(issuesArr)}
                 const { db, doc, deleteDoc } = window.fs;
                 await withTimeout(deleteDoc(doc(db, AK_COLL, docId)), 8000, "정답세트 삭제");
                 delete answerKeys[sig];
+                bumpAnswerKeyRev();
                 return;
             } catch (e) { console.warn("정답세트 SDK 삭제 실패 → REST 시도:", e); }
         }
         await restDeleteDoc(AK_COLL, docId);
         delete answerKeys[sig];
+        bumpAnswerKeyRev();
     }
 
     /* ---------- 진행 상태 오버레이 ---------- */
@@ -4557,7 +4761,7 @@ ${JSON.stringify(I)}
                    ${r.ak.needsReview ? `<br><span class="stale-chip" style="background:var(--danger)">⚠ 임계치 미달 — 내용 확인 권장</span>` : ""}
                    ${r.ak.orphanCount ? `<br><span style="color:var(--warn); font-size:.72rem;">통합에 편입되지 못한 원본 지적 ${r.ak.orphanCount}건</span>` : ""}
                    ${r.ak.droppedCount ? `<br><span style="color:var(--warn); font-size:.72rem;">원본 근거가 없어 제외한 AI 항목 ${r.ak.droppedCount}건</span>` : ""}<br>
-                   <span class="use-chip ${use}" onclick="App.akToggleUsage('${r.ak.sig}')">${use === "quiz" ? "🔒 진단 전용 (입력 마감)" : "🔁 입력 계속 받는 중"}</span>
+                   <span class="use-chip ${use}" onclick="App.akToggleUsage('${r.ak.sig}')" title="표시용 구분일 뿐, 어느 쪽이든 위험요인 입력은 계속 받습니다.">${use === "quiz" ? "🎯 진단 중심" : "🔁 입력 계속 받는 중"}</span>
                    ${freshTxt}`
                 : (r.pending
                     ? `<b style="color:var(--warn)">🔔 생성 대기</b> <span style="color:var(--muted)">— 지금 만들 수 있습니다</span>`
@@ -4746,7 +4950,7 @@ ${JSON.stringify(I)}
             await persistAnswerKey({ ...ak, usage: next });
             renderAnswerKeyPanel();
             renderUserGallery();
-            showToast(next === "quiz" ? "🔒 진단 전용으로 바꿨습니다 (입력 마감)" : "🔁 입력을 다시 받습니다");
+            showToast(next === "quiz" ? "🎯 진단 중심으로 표시합니다 (입력은 계속 받습니다)" : "🔁 입력 수집 중으로 표시합니다");
         } catch (e) { showToast("❌ 변경 실패: " + (e.message || e)); }
     }
 
@@ -4966,7 +5170,14 @@ ${JSON.stringify(I)}
                부득이한 경우 '무명 / 무소속'으로 표기해 저장한다. */
             let name = String(p.name || "").trim();
             let org = String(p.org || "").trim();
-            if (!name || /^(익명|무명|미입력|없음)$/.test(name)) { name = "무명"; if (!org) org = "무소속"; }
+            /* [수정20] 이름을 알 수 없는 참여자를 전부 "무명/무소속" 한 사람으로 합치면,
+               서로 다른 사람의 관찰이 한 문서에 뭉쳐 자료가 망가진다.
+               식별자 뒷자리를 붙여 사람을 갈라 둔다(표시는 '무명-a1b2' 형태). */
+            if (!name || /^(익명|무명|미입력|없음|anonymous|anon)$/i.test(name)) {
+                const tag = String(p.pkey || p.dbId || Date.now()).replace(/[^a-z0-9]/gi, "").slice(-4) || "0000";
+                name = "무명-" + tag;
+                if (!org) org = "무소속";
+            }
             if (!org) org = "무소속";
             /* [수정13] 승격된 항목 한 줄만이 아니라, 이 응시자가 찾아낸 위험요인 전부를 등록한다.
                진단자 = 분석자로 편입하는 것이므로 그 사람의 지적 전체가 DB에 남아야 한다.
@@ -5497,7 +5708,7 @@ ${JSON.stringify(I)}
         backToGallery, quickAdd,
         saveSheet, closeSheet, deleteActivePin,
         closePeerModal, submitEntry, backupMine,
-        selectAll, clearFilter, printAll, printReport, analyze, closeModal,
+        selectAll, clearFilter, printAll, printPhotoPostits, printReport, analyze, closeModal,
         saveReGrouped, showReport, modifyReGroup, resetReGroup,
         renderTable, retryLoad, runDiagnostics,
         /* --- 수준 진단 --- */
