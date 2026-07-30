@@ -763,6 +763,7 @@
                             <th style="width:70px;">사진</th>
                             <th style="width:110px; text-align:center;">응시</th>
                             <th>승격 후보 (정답 세트에 없던 지적)</th>
+                            <th style="width:110px;"></th>
                         </tr></thead>
                         <tbody id="qrTableBody"></tbody>
                     </table>
@@ -1577,7 +1578,17 @@
         if (ag) ag.innerHTML = panel;
     }
 
+    /* [수정9] window.fs(파이어베이스 SDK) 미준비 상태 방어.
+       최초 부팅(init)에는 검사가 있었지만, '다시 시도'(retryLoad)와
+       백그라운드 복귀 재연결(softReconnect)은 검사 없이 바로 구조분해해
+       SDK 로딩이 실패한 환경에서 TypeError 로 죽었다.
+       하필 자동 복구 경로여서, 복구하려는 그 상황에서 앱이 멈췄다. */
+    function fsReady() {
+        return !!(window.fs && window.fs.db && window.fs.collection && window.fs.onSnapshot);
+    }
+
     function watchGallery() {
+        if (!fsReady()) { console.warn("watchGallery: SDK 미준비 → REST 폴백"); galleryFallback(); return; }
         const { db, collection, query, orderBy, onSnapshot, getDocs } = window.fs;
         const q = query(collection(db, "site_photos"), orderBy("timestamp", "desc"));
 
@@ -1619,6 +1630,7 @@
     }
 
     function watchData() {
+        if (!fsReady()) { console.warn("watchData: SDK 미준비 → REST 폴백"); dataFallback(); return; }
         const { db, collection, query, orderBy, onSnapshot, getDocs } = window.fs;
         const q = query(collection(db, "inspections"), orderBy("timestamp", "desc"));
 
@@ -3184,7 +3196,12 @@ ${JSON.stringify(issuesArr)}
         return r.keys.size + r.anon;
     }
     function getAnswerKey(photoImage) { return answerKeys[sigOf(photoImage)] || null; }
-    function coreItems(ak) { return (ak && ak.items ? ak.items : []).filter((i) => i.core !== false); }
+    /* [수정8] 핵심 항목 집계에서도 '틀리다' 판정 항목을 뺀다.
+       채점(gradeQuiz)은 gradableItems 로 이미 제외하는데 이 함수는 제외하지 않아,
+       배너·제출바·관리자 표에 표시되는 핵심 개수가 실제 채점 분모와 어긋났다. */
+    function coreItems(ak) {
+        return (ak && ak.items ? ak.items : []).filter((i) => i.core !== false && i.verdict !== "no");
+    }
 
     /* ---------- 정답 세트 로드 / 저장 / 삭제 ---------- */
     async function loadAnswerKeys(silent) {
@@ -4212,12 +4229,12 @@ ${JSON.stringify(I)}
         if (!tb || !isAdminAuth) return;
 
         if (!_qrLoaded) {
-            tb.innerHTML = `<tr><td colspan="3"><div class="empty-state">
+            tb.innerHTML = `<tr><td colspan="4"><div class="empty-state">
                 '🔄 진단 기록 불러오기'를 눌러 주세요.</div></td></tr>`;
             return;
         }
         if (quizResults.length === 0) {
-            tb.innerHTML = `<tr><td colspan="3"><div class="empty-state">
+            tb.innerHTML = `<tr><td colspan="4"><div class="empty-state">
                 아직 저장된 수준진단 응시 기록이 없습니다.</div></td></tr>`;
             return;
         }
@@ -4232,7 +4249,7 @@ ${JSON.stringify(I)}
         }).filter((r) => r.tries > 0);
 
         if (rows.length === 0) {
-            tb.innerHTML = `<tr><td colspan="3"><div class="empty-state">
+            tb.innerHTML = `<tr><td colspan="4"><div class="empty-state">
                 현재 등록된 사진과 연결되는 응시 기록이 없습니다.</div></td></tr>`;
             return;
         }
@@ -4260,8 +4277,59 @@ ${JSON.stringify(I)}
                     <div style="color:var(--faint); font-size:.72rem;">응시 ${r.tries}회</div>
                     <div style="color:var(--faint); font-size:.68rem;">이름 ${r.named} · 기기 ${r.people - r.named}</div>
                 </td>
-                <td>${body}${weakTxt}</td></tr>`;
+                <td>${body}${weakTxt}</td>
+                <td style="white-space:nowrap;">
+                    <button class="btn btn-ghost btn-sm" onclick="App.clearQuizResults('${r.p.id}')">🗑 기록 삭제</button>
+                </td></tr>`;
         }).join("");
+    }
+
+    /* [수정11] 사진 1장의 진단 응시 기록을 통째로 지운다.
+       진단의 목적은 ① 본인 테스트 ② 신규 위험요인 발굴이므로,
+       승격/기각 판정이 끝나면 원본 응시 기록은 역할이 끝난다.
+       테스트 중 쌓인 기록 정리에도 쓴다. */
+    async function clearQuizResults(photoId) {
+        const p = photoList.find((x) => x.id === photoId);
+        if (!p) return;
+        const sig = sigOf(p.image);
+        const rows = quizResults.filter((r) => r.sig === sig);
+        if (rows.length === 0) { showToast("삭제할 기록이 없습니다"); return; }
+
+        const cand = newCandidates(sig, answerKeys[sig] || { items: [] }).filter((c) => c.support >= 2);
+        const warn = cand.length
+            ? `<br><b style="color:var(--danger)">아직 판정하지 않은 승격 후보 ${cand.length}건도 함께 사라집니다.</b>`
+            : "";
+        if (!await customConfirm(
+            `이 사진의 <b>진단 응시 기록 ${rows.length}건</b>을 삭제할까요?${warn}
+             <br><span style="color:var(--muted);font-size:.8rem;">
+             이미 정답 세트에 반영한 항목과 분석자로 등록한 기록은 그대로 남습니다.</span>`)) return;
+
+        busyShow("🗑 진단 기록 삭제", ["서버에서 삭제", "목록 갱신"]);
+        try {
+            busyStep(0);
+            let done = 0;
+            for (const r of rows) {
+                if (!r.dbId) continue;
+                try {
+                    if (window.__authReady && window.fs && window.fs.db && window.fs.deleteDoc && window.fs.doc) {
+                        const { db, doc, deleteDoc } = window.fs;
+                        await withTimeout(deleteDoc(doc(db, QR_COLL, r.dbId)), 8000, "진단기록 삭제");
+                    } else {
+                        await restDeleteDoc(QR_COLL, r.dbId);
+                    }
+                    done++;
+                } catch (e) { console.warn("진단기록 삭제 실패:", r.dbId, e); }
+            }
+            busyStep(1);
+            quizResults = quizResults.filter((r) => r.sig !== sig);
+            renderQuizInflowPanel();
+            busyHide();
+            showToast(`🗑 진단 기록 ${done}건을 삭제했습니다`
+                + (done < rows.length ? ` (실패 ${rows.length - done}건)` : ""));
+        } catch (e) {
+            busyHide();
+            showToast("❌ 삭제 실패: " + (e.message || e));
+        }
     }
 
     async function refreshQuizResults() {
@@ -4395,8 +4463,13 @@ ${JSON.stringify(I)}
         const ak = answerKeys[sig];
         if (!ak) return;
         _mnSig = sig;
-        const minors = (ak.items || []).map((it, i) => ({ it, i }))
-            .filter((x) => x.it.core === false)
+        /* [수정10] 판정이 끝난 항목은 목록에서 내린다.
+           기존에는 core === false 인 항목을 전부 보여줘서, 맞다/틀리다를 정하고
+           저장해도 다음에 열면 똑같이 다시 떠 있었다. 판정할 것만 남긴다. */
+        const allMinor = (ak.items || []).map((it, i) => ({ it, i })).filter((x) => x.it.core === false);
+        const doneCnt = allMinor.filter((x) => x.it.verdict).length;
+        const minors = allMinor
+            .filter((x) => !x.it.verdict)
             .sort((a, b) => (Number(b.it.support || 1) - Number(a.it.support || 1)));
 
         const body = document.getElementById("mnBody");
@@ -4405,11 +4478,19 @@ ${JSON.stringify(I)}
         const cm = akCoreMin(ak);
 
         document.getElementById("mnModalTitle").textContent =
-            `🧑‍⚖️ 소수의견 판정 (기존 ${minors.length}건${cand.length ? " · 신규 " + cand.length + "건" : ""})`;
+            `🧑‍⚖️ 소수의견 판정 (미판정 ${minors.length}건${cand.length ? " · 신규 " + cand.length + "건" : ""})`;
+
+        // 이미 판정을 끝낸 항목은 목록에 넣지 않고 건수만 알려 준다.
+        const doneTxt = doneCnt
+            ? `<div style="background:#f0fdf4; border:1px solid var(--success); border-radius:10px;
+                    padding:8px 12px; margin:0 0 12px; font-size:.78rem; color:#166534;">
+                 ✅ 이미 판정을 마친 항목 <b>${doneCnt}건</b>은 목록에서 내렸습니다.
+                 다시 보거나 되돌리려면 <b>✏️ 편집</b>에서 확인하세요.</div>`
+            : "";
 
         if (minors.length === 0 && cand.length === 0) {
-            body.innerHTML = `<div class="empty-state">판정할 항목이 없습니다.<br>
-                모든 항목이 핵심 정답 기준을 넘었고, 새로 올라온 지적도 없습니다.</div>`;
+            body.innerHTML = doneTxt + `<div class="empty-state">판정할 항목이 없습니다.<br>
+                남은 소수의견도, 새로 올라온 지적도 없습니다.</div>`;
             document.getElementById("mnModal").classList.add("show");
             return;
         }
@@ -4444,14 +4525,14 @@ ${JSON.stringify(I)}
                    </div>`
                 : "");
 
-        body.innerHTML = `
+        body.innerHTML = doneTxt + `
         <p style="font-size:.82rem; color:var(--muted); margin:0 0 12px;">
             💡 지적한 사람이 적어 <b>핵심 정답 기준에 못 미친 항목</b>입니다.
             드물지만 타당한 지적일 수도, 잘못 본 것일 수도 있습니다.
             <b>사진을 보고 맞다 / 틀리다만 정해 주세요.</b><br>
             <span style="color:var(--faint);">· 틀리다 → 채점에서 제외됩니다 (응시자가 같은 말을 써도 가산점 없음)<br>
             · 맞다 → 정답으로 인정됩니다 (보너스 항목)<br>
-            · 판정하지 않고 두어도 됩니다 — 지금까지와 동일하게 동작합니다<br>
+            · 판정하면 이 목록에서 사라집니다 (되돌리려면 '✏️ 편집')<br>
             · 같은 뜻인데 AI가 따로 떼어 놓은 항목이라면, 판정 대신 '정답 세트 편집 → 선택 항목 합치기'를 쓰세요.</span>
         </p>
         ${candHtml}
@@ -4505,9 +4586,14 @@ ${JSON.stringify(I)}
     async function registerQuizAnalysts(photoImage, people, text) {
         let added = 0, merged = 0;
         for (const p of (people || [])) {
-            const name = String(p.name || "").trim();
-            if (!name || /^(익명|무명)$/.test(name)) continue;   // 식별 불가한 응시자는 건너뛴다
-            const org = String(p.org || "").trim();
+            /* [수정10] 이름이 없어도 건너뛰지 않는다.
+               기존에는 익명 응시자를 통째로 skip 해서, 진단 화면에 이름칸이 없던
+               시절의 기록은 승인해도 DB에 아무것도 추가되지 않았다.
+               부득이한 경우 '무명 / 무소속'으로 표기해 저장한다. */
+            let name = String(p.name || "").trim();
+            let org = String(p.org || "").trim();
+            if (!name || /^(익명|무명|미입력|없음)$/.test(name)) { name = "무명"; if (!org) org = "무소속"; }
+            if (!org) org = "무소속";
             const mine = String(p.text || text || "").trim();
             if (!mine) continue;
             try {
@@ -4629,6 +4715,7 @@ ${JSON.stringify(I)}
     function closeMinorityModal() {
         document.getElementById("mnModal").classList.remove("show");
         _mnSig = null;
+        _mnCand = [];          // 오래된 후보 데이터가 남지 않도록 비운다
     }
 
     function editAnswerKey(sig) {
@@ -4952,7 +5039,7 @@ ${JSON.stringify(I)}
         akToggleCore, akDelItem, akAddItem, akMerge, akSave, closeAkModal,
         akToggleUsage, saveAsAnswerKey, akShowEntries,
         /* --- [수정3] 수준진단 유입 --- */
-        refreshQuizResults, exportQuizResults,
+        refreshQuizResults, exportQuizResults, clearQuizResults,
         /* --- [수정4] 소수의견 전문가 판정 --- */
         openMinorityModal, setVerdict, setCandVerdict, saveMinorityVerdicts, closeMinorityModal
     };
