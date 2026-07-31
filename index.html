@@ -1383,6 +1383,23 @@
         } while (token && ++guard < 20);
         return docs;
     }
+    /* [수정31] 문서 1건 REST 읽기 — '서버의 현재 값' 전용 통로.
+       ---------------------------------------------------------
+       SDK 의 getDoc 은 스트리밍 채널이 끊겨 있으면 서버에 가지 않고
+       로컬 캐시로 즉시 응답한다(snap.metadata.fromCache === true).
+       그래서 "확인했다"는 결과가 실제로는 예전 값일 수 있다.
+       REST 는 일반 HTTPS 요청이라 그 채널·캐시와 완전히 무관하고,
+       cache:"no-store" 이므로 브라우저 캐시도 타지 않는다. */
+    async function restFetchDoc(coll, docId) {
+        const cfg = window.FB || {};
+        if (!cfg.projectId || !cfg.apiKey) throw new Error("프로젝트 설정(window.FB) 없음");
+        const url = `https://firestore.googleapis.com/v1/projects/${cfg.projectId}/databases/(default)/documents/`
+            + `${coll}/${encodeURIComponent(docId)}?key=${encodeURIComponent(cfg.apiKey)}`;
+        const res = await withTimeout(fetch(url, { method: "GET", cache: "no-store" }), 8000, "REST 문서 읽기");
+        if (res.status === 404) return null;              // 서버에 없음 = 확정된 사실
+        if (!res.ok) throw new Error("REST HTTP " + res.status);
+        return restDocToObj(await res.json());
+    }
     async function restLoadPhotos() {
         const docs = await restFetchCollection("site_photos", 300);
         photoList = docs;
@@ -3836,19 +3853,23 @@ ${JSON.stringify(issuesArr)}
        호출자(syncNow)가 맡는다. */
     async function answerKeyChanged() {
         try {
-            let rev = "";
+            let rev = null;   // null = 아직 '서버 값'으로 확정하지 못함
             if (window.fs && window.fs.db && window.fs.doc && window.fs.getDoc) {
-                const { db, doc, getDoc } = window.fs;
-                const snap = await withTimeout(getDoc(doc(db, AK_COLL, AK_VER_DOC)), 5000, "변경 확인");
-                rev = (snap && snap.exists && snap.exists()) ? String((snap.data() || {}).rev || "") : "";
-            } else {
-                const cfg = window.FB || {};
-                if (!cfg.projectId || !cfg.apiKey) return { changed: true, rev: "" };
-                const url = `https://firestore.googleapis.com/v1/projects/${cfg.projectId}/databases/(default)/documents/${AK_COLL}/${AK_VER_DOC}?key=${encodeURIComponent(cfg.apiKey)}`;
-                const res = await withTimeout(fetch(url), 5000, "변경 확인");
-                if (!res.ok) return { changed: res.status !== 404, rev: "" };
-                const j = await res.json();
-                rev = String(((j.fields || {}).rev || {}).stringValue || "");
+                try {
+                    const { db, doc, getDoc } = window.fs;
+                    const snap = await withTimeout(getDoc(doc(db, AK_COLL, AK_VER_DOC)), 5000, "변경 확인");
+                    let fromServer = false;
+                    try { fromServer = !!(snap && snap.metadata && snap.metadata.fromCache === false); } catch (_) { }
+                    /* [수정31] 캐시로 응답한 값은 '확인'이 아니다.
+                       채널이 끊겨 있으면 getDoc 은 서버에 가지 않고 로컬 캐시로
+                       답하는데, 그 rev 는 당연히 _akRevSeen 과 같다. 그러면
+                       "변화 없음"으로 판정되어 갱신이 영원히 일어나지 않는다. */
+                    if (fromServer) rev = (snap && snap.exists && snap.exists()) ? String((snap.data() || {}).rev || "") : "";
+                } catch (e) { console.warn("변경 확인 SDK 실패 → REST 로 확인:", e); }
+            }
+            if (rev === null) {
+                const d = await restFetchDoc(AK_COLL, AK_VER_DOC);   // 서버 직통
+                rev = d ? String(d.rev || "") : "";
             }
             /* [수정27] 변경표시 문서가 아직 없는 경우(이 기능 도입 전에 만들어진
                데이터, 또는 아직 아무도 정답 세트를 저장하지 않은 상태)에는
@@ -4743,30 +4764,39 @@ ${JSON.stringify(I)}
     async function fetchAnswerKeyFresh(photoImage) {
         const sig = sigOf(photoImage);
         const docId = AK_PREFIX + sig;
+
+        /* ① SDK 로 읽되, '서버가 준 값'일 때만 확인으로 인정한다.
+           [수정31] 예전에는 fromCache 를 보지 않아, 채널이 끊긴 상태에서
+           getDoc 이 로컬 캐시로 즉시 답한 예전 정답을 '서버 확인 완료'로
+           받아들였다. 지연도 없어서 사용자는 확인이 된 줄로 안다.
+           그 실패한 시도가 SDK 재연결을 유발하므로, 나갔다 다시 들어오면
+           그때야 최신이 뜬다 — 바로 그 증상의 원인이다. */
         try {
             if (window.fs && window.fs.db && window.fs.doc && window.fs.getDoc) {
                 const { db, doc, getDoc } = window.fs;
                 const snap = await withTimeout(getDoc(doc(db, AK_COLL, docId)), 6000, "정답세트 확인");
-                if (snap && snap.exists && snap.exists()) {
-                    /* [수정30] 읽어온 문서 '하나만' 제자리에 갈아끼운다.
-                       ---------------------------------------------------------
-                       예전에는 서버 최신본 뒤에 메모리에 있던 낡은 사본 전부를
-                       이어붙여 applyAnswerKeyDocs 에 넘겼다. 그런데 그 목록에는
-                       지금 열려는 사진의 낡은 사본도 같은 sig 로 들어 있어서,
-                       map[sig] = ... 를 순서대로 실행하는 동안 뒤엣것(낡은 것)이
-                       앞엣것(최신본)을 덮어썼다. 결과적으로 이 함수는 서버를
-                       읽고도 아무 일도 하지 않았고, 관리자가 정답을 고쳐도
-                       응시자 화면은 예전 정답 그대로였다.
-                       덤으로, 되밀어 넣던 사본에는 coreMin·orphanCount·
-                       droppedCount·needsReview 가 빠져 있어 다른 사진의 값까지
-                       0/false 로 뭉개고 그대로 캐시에 저장하고 있었다. */
-                    return upsertAnswerKeyDoc({ _dbId: docId, ...snap.data() });
+                let fromServer = false;
+                try { fromServer = !!(snap && snap.metadata && snap.metadata.fromCache === false); } catch (_) { }
+                if (fromServer) {
+                    if (snap && snap.exists && snap.exists()) {
+                        return { ak: upsertAnswerKeyDoc({ _dbId: docId, ...snap.data() }), verified: true };
+                    }
+                    forgetAnswerKey(sig);          // 서버에서 삭제됨 (확정)
+                    return { ak: null, verified: true };
                 }
-                forgetAnswerKey(sig);   // 서버에서 삭제된 세트는 로컬에서도 지운다
-                return null;
+                console.warn("[점검앱] getDoc 이 로컬 캐시로 응답 → REST 로 서버에 직접 확인합니다");
             }
-        } catch (e) { console.warn("정답세트 즉시 확인 실패(무시):", e); }
-        return getAnswerKey(photoImage);
+        } catch (e) { console.warn("정답세트 SDK 확인 실패 → REST 로 확인:", e); }
+
+        // ② REST — 스트리밍 채널·로컬 캐시와 무관한 별도 경로
+        try {
+            const d = await restFetchDoc(AK_COLL, docId);
+            if (!d) { forgetAnswerKey(sig); return { ak: null, verified: true }; }
+            return { ak: upsertAnswerKeyDoc({ ...d, _dbId: docId }), verified: true };
+        } catch (e) { console.warn("정답세트 REST 확인 실패:", e); }
+
+        // ③ 두 경로 모두 실패 — 갖고 있는 사본을 '최신'이라고 말하지 않는다.
+        return { ak: getAnswerKey(photoImage), verified: false };
     }
 
     async function selectPhotoQuiz(src) {
@@ -4778,8 +4808,22 @@ ${JSON.stringify(I)}
            중요한 길목마다 서버에 직접 물어보는 것이 확실하다.
            읽는 것은 이 사진의 정답 문서 하나뿐이라 비용도 거의 없다. */
         busyShow("🔎 정답 세트 확인", ["서버 확인"]);
-        let ak = await fetchAnswerKeyFresh(src);
+        const chk = await fetchAnswerKeyFresh(src);
         busyHide();
+
+        /* [수정31] 서버에서 확인하지 못했으면 진단을 시작하지 않는다.
+           갖고 있던 사본으로 그냥 들어가면 사용자는 화면에 보이는 것이
+           최신이라고 믿고 응시한다. '확인 못 했다'고 말하는 편이
+           낡은 정답으로 채점하는 것보다 낫다. */
+        if (!chk.verified) {
+            await customConfirm(
+                "서버에서 <b>최신 정답 세트를 확인하지 못했습니다.</b><br>" +
+                "<span style=\"color:var(--muted);font-size:.85rem;\">" +
+                "네트워크 상태를 확인하고 잠시 뒤 다시 시도해 주세요.<br>" +
+                "확인되지 않은 정답으로 채점하지 않기 위해 진단을 시작하지 않습니다.</span>");
+            return;
+        }
+        let ak = chk.ak;
         if (!ak) {
             const ok = await customConfirm(
                 "이 사진의 <b>정답 세트</b>가 아직 없습니다.<br>" +
@@ -4787,9 +4831,13 @@ ${JSON.stringify(I)}
             if (!ok) return;
             // 확인창을 띄운 사이에 다른 사람이 만들었을 수도 있다.
             const again = await fetchAnswerKeyFresh(src);
-            if (again) {
+            if (again.verified && again.ak) {
                 showToast("✅ 다른 기기에서 방금 만든 정답 세트를 불러왔습니다");
-                ak = again;      // 생성하지 않고 그대로 진단으로 진행한다
+                ak = again.ak;   // 생성하지 않고 그대로 진단으로 진행한다
+            } else if (!again.verified) {
+                // 확인이 안 되는 상태에서 새로 만들면 중복 생성 위험이 있다.
+                showToast("⚠️ 서버 확인이 되지 않아 생성을 중단했습니다 · 잠시 뒤 다시 시도해 주세요");
+                return;
             }
             if (!ak) {
             busyShow(`🎯 정답 세트 생성 · 분석자 ${cnt}명`, AK_STEPS);
@@ -4886,9 +4934,16 @@ ${JSON.stringify(I)}
            채점은 언제나 '제출 시점의 정답'으로 해야 한다. */
         try {
             busyShow("🔎 정답 세트 확인", ["최신본 확인"]);
-            const latest = await fetchAnswerKeyFresh(currentPhoto);
+            const chk = await fetchAnswerKeyFresh(currentPhoto);
             busyHide();
-            if (!latest) {
+            const latest = chk.ak;
+            /* [수정31] 제출 시점에는 응시자가 이미 입력을 마친 상태다.
+               확인이 안 된다고 되돌려보내면 그 입력을 잃는다. 여기서는
+               갖고 있던 사본으로 채점하되, 확인하지 못했음을 분명히 알린다. */
+            if (!chk.verified) {
+                showToast("⚠️ 최신 정답 세트를 확인하지 못해 갖고 있던 사본으로 채점합니다");
+            }
+            if (!latest && chk.verified) {
                 // 세트가 사라졌다 → 채점은 못 하지만 입력한 자료는 반드시 남긴다.
                 busyShow("💾 입력 자료 저장", ["서버에 저장"]);
                 try {
@@ -4912,11 +4967,13 @@ ${JSON.stringify(I)}
                그래서 예전 조건으로는 관리자의 '내용 수정'을 전혀 잡지 못했다.
                어차피 latest 가 제출 시점의 정답이므로 항상 그것으로 채점하고,
                실제로 달라졌을 때만 사용자에게 알린다. */
-            const changed = JSON.stringify(latest.items || []) !== JSON.stringify(quizKey.items || []);
-            quizKey = latest;
-            if (changed) {
-                applyQuizChrome(true);
-                showToast("🔄 정답 세트가 방금 갱신되어 최신본으로 채점합니다");
+            if (latest) {
+                const changed = JSON.stringify(latest.items || []) !== JSON.stringify(quizKey.items || []);
+                quizKey = latest;
+                if (changed) {
+                    applyQuizChrome(true);
+                    showToast("🔄 정답 세트가 방금 갱신되어 최신본으로 채점합니다");
+                }
             }
         } catch (e) {
             busyHide();
