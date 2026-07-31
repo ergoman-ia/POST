@@ -1324,6 +1324,20 @@
         ]);
     }
 
+    /* [수정32] 여러 경로를 동시에 던지고 '가장 먼저 성공한' 결과를 쓴다.
+       전부 실패했을 때만 실패한다. (Promise.any 는 구형 모바일 브라우저에
+       없을 수 있어 직접 구현한다.) */
+    function firstSuccess(promises) {
+        return new Promise((resolve, reject) => {
+            let left = promises.length, done = false, lastErr = null;
+            if (!left) { reject(new Error("시도할 경로가 없습니다")); return; }
+            promises.forEach((p) => Promise.resolve(p).then(
+                (v) => { if (!done) { done = true; resolve(v); } },
+                (e) => { lastErr = e; if (--left === 0 && !done) reject(lastErr); }
+            ));
+        });
+    }
+
     // 1회성 읽기 (실시간 연결이 늦거나 실패할 때 화면을 채워준다)
     async function oneShotLoad(q, getDocs, apply, onFail) {
         try {
@@ -3538,6 +3552,7 @@ ${JSON.stringify(issuesArr)}
     let _akLive = false;               // [수정22] 실시간 구독이 서버에 붙어 있는지
     let _akLastVerify = 0;             // [수정30] 마지막으로 '서버에 직접 물어본' 시각
     const AK_VERIFY_MS = 15000;        // [수정30] 구독이 살아 보여도 이 간격으로는 확인한다
+    const AK_SDK_WAIT_MS = 3000;       // [수정32] SDK 응답을 기다리는 상한(REST 가 병행되므로 짧아도 된다)
     const LS_AK_CACHE = "ak_cache_v1";
 
     /* [수정15] 정답 세트 로컬 캐시.
@@ -3852,25 +3867,31 @@ ${JSON.stringify(issuesArr)}
        그 변경분을 영영 가져오지 못했다. 표시를 올리는 일은 읽기에 성공한
        호출자(syncNow)가 맡는다. */
     async function answerKeyChanged() {
+        // [수정32] 여기도 SDK·REST 를 나란히 던진다. 15초마다 도는 확인이
+        //          채널이 죽었을 때 매번 5초씩 멈춰 있을 이유가 없다.
+        const viaSdk = (async () => {
+            if (!(window.fs && window.fs.db && window.fs.doc && window.fs.getDoc)) throw new Error("SDK 준비 안 됨");
+            const { db, doc, getDoc } = window.fs;
+            const snap = await withTimeout(getDoc(doc(db, AK_COLL, AK_VER_DOC)), AK_SDK_WAIT_MS, "변경 확인");
+            let fromServer = false;
+            try { fromServer = !!(snap && snap.metadata && snap.metadata.fromCache === false); } catch (_) { }
+            /* [수정31] 캐시로 응답한 rev 는 당연히 _akRevSeen 과 같다.
+               그것을 '변화 없음'으로 인정하면 갱신이 영원히 일어나지 않는다. */
+            if (!fromServer) throw new Error("로컬 캐시 응답");
+            return (snap && snap.exists && snap.exists()) ? String((snap.data() || {}).rev || "") : "";
+        })();
+        const viaRest = (async () => {
+            const d = await restFetchDoc(AK_COLL, AK_VER_DOC);   // 서버 직통
+            return d ? String(d.rev || "") : "";
+        })();
+
+        let rev;
+        try { rev = await firstSuccess([viaSdk, viaRest]); }
+        catch (e) {
+            console.warn("정답세트 변경 확인 실패:", e);
+            return { changed: false, rev: "" };
+        }
         try {
-            let rev = null;   // null = 아직 '서버 값'으로 확정하지 못함
-            if (window.fs && window.fs.db && window.fs.doc && window.fs.getDoc) {
-                try {
-                    const { db, doc, getDoc } = window.fs;
-                    const snap = await withTimeout(getDoc(doc(db, AK_COLL, AK_VER_DOC)), 5000, "변경 확인");
-                    let fromServer = false;
-                    try { fromServer = !!(snap && snap.metadata && snap.metadata.fromCache === false); } catch (_) { }
-                    /* [수정31] 캐시로 응답한 값은 '확인'이 아니다.
-                       채널이 끊겨 있으면 getDoc 은 서버에 가지 않고 로컬 캐시로
-                       답하는데, 그 rev 는 당연히 _akRevSeen 과 같다. 그러면
-                       "변화 없음"으로 판정되어 갱신이 영원히 일어나지 않는다. */
-                    if (fromServer) rev = (snap && snap.exists && snap.exists()) ? String((snap.data() || {}).rev || "") : "";
-                } catch (e) { console.warn("변경 확인 SDK 실패 → REST 로 확인:", e); }
-            }
-            if (rev === null) {
-                const d = await restFetchDoc(AK_COLL, AK_VER_DOC);   // 서버 직통
-                rev = d ? String(d.rev || "") : "";
-            }
             /* [수정27] 변경표시 문서가 아직 없는 경우(이 기능 도입 전에 만들어진
                데이터, 또는 아직 아무도 정답 세트를 저장하지 않은 상태)에는
                '변화 없음'으로 단정하면 폴링 중인 기기가 영영 갱신되지 않는다.
@@ -4765,38 +4786,44 @@ ${JSON.stringify(I)}
         const sig = sigOf(photoImage);
         const docId = AK_PREFIX + sig;
 
-        /* ① SDK 로 읽되, '서버가 준 값'일 때만 확인으로 인정한다.
-           [수정31] 예전에는 fromCache 를 보지 않아, 채널이 끊긴 상태에서
-           getDoc 이 로컬 캐시로 즉시 답한 예전 정답을 '서버 확인 완료'로
-           받아들였다. 지연도 없어서 사용자는 확인이 된 줄로 안다.
-           그 실패한 시도가 SDK 재연결을 유발하므로, 나갔다 다시 들어오면
-           그때야 최신이 뜬다 — 바로 그 증상의 원인이다. */
-        try {
-            if (window.fs && window.fs.db && window.fs.doc && window.fs.getDoc) {
-                const { db, doc, getDoc } = window.fs;
-                const snap = await withTimeout(getDoc(doc(db, AK_COLL, docId)), 6000, "정답세트 확인");
-                let fromServer = false;
-                try { fromServer = !!(snap && snap.metadata && snap.metadata.fromCache === false); } catch (_) { }
-                if (fromServer) {
-                    if (snap && snap.exists && snap.exists()) {
-                        return { ak: upsertAnswerKeyDoc({ _dbId: docId, ...snap.data() }), verified: true };
-                    }
-                    forgetAnswerKey(sig);          // 서버에서 삭제됨 (확정)
-                    return { ak: null, verified: true };
-                }
-                console.warn("[점검앱] getDoc 이 로컬 캐시로 응답 → REST 로 서버에 직접 확인합니다");
-            }
-        } catch (e) { console.warn("정답세트 SDK 확인 실패 → REST 로 확인:", e); }
+        /* [수정32] SDK 와 REST 를 '동시에' 던지고 먼저 도착한 서버 응답을 쓴다.
+           ---------------------------------------------------------
+           예전에는 SDK 를 먼저 기다리고 실패하면 REST 로 갔다. 그런데
+           롱폴링 채널이 식어 있거나 막혀 있으면 getDoc 은 응답도 오류도
+           내지 않고 멈춰 있다가 withTimeout 상한에 걸린다. "정답 세트 확인"이
+           늘 5~6초 걸린 것은 그 상한(6000ms)을 그대로 기다린 시간이었을 뿐,
+           그 사이에 한 일은 아무것도 없다.
+           REST 는 채널 수립 없이 곧장 나가는 HTTPS 요청이라 보통 0.3초면
+           끝난다. 둘을 나란히 보내면 채널이 건강할 때나 죽었을 때나
+           체감 시간이 같아진다. 읽는 것은 어느 쪽이든 작은 문서 하나다. */
+        const viaSdk = (async () => {
+            if (!(window.fs && window.fs.db && window.fs.doc && window.fs.getDoc)) throw new Error("SDK 준비 안 됨");
+            const { db, doc, getDoc } = window.fs;
+            const snap = await withTimeout(getDoc(doc(db, AK_COLL, docId)), AK_SDK_WAIT_MS, "정답세트 확인");
+            let fromServer = false;
+            try { fromServer = !!(snap && snap.metadata && snap.metadata.fromCache === false); } catch (_) { }
+            /* [수정31] 캐시로 답한 값은 '확인'이 아니다. 채널이 끊겨 있으면
+               getDoc 은 서버에 가지 않고 로컬 캐시로 즉시 답하며, 그것을
+               서버 확인으로 인정하면 예전 정답을 최신이라고 믿게 된다. */
+            if (!fromServer) throw new Error("로컬 캐시 응답 — 확인으로 인정하지 않음");
+            return (snap && snap.exists && snap.exists()) ? { _dbId: docId, ...snap.data() } : null;
+        })();
 
-        // ② REST — 스트리밍 채널·로컬 캐시와 무관한 별도 경로
-        try {
+        const viaRest = (async () => {
             const d = await restFetchDoc(AK_COLL, docId);
-            if (!d) { forgetAnswerKey(sig); return { ak: null, verified: true }; }
-            return { ak: upsertAnswerKeyDoc({ ...d, _dbId: docId }), verified: true };
-        } catch (e) { console.warn("정답세트 REST 확인 실패:", e); }
+            return d ? { ...d, _dbId: docId } : null;
+        })();
 
-        // ③ 두 경로 모두 실패 — 갖고 있는 사본을 '최신'이라고 말하지 않는다.
-        return { ak: getAnswerKey(photoImage), verified: false };
+        let serverDoc;
+        try {
+            serverDoc = await firstSuccess([viaSdk, viaRest]);
+        } catch (e) {
+            // 두 경로 모두 실패 — 갖고 있는 사본을 '최신'이라고 말하지 않는다.
+            console.warn("정답 세트 서버 확인 실패(SDK·REST 모두):", e);
+            return { ak: getAnswerKey(photoImage), verified: false };
+        }
+        if (!serverDoc) { forgetAnswerKey(sig); return { ak: null, verified: true }; }
+        return { ak: upsertAnswerKeyDoc(serverDoc), verified: true };
     }
 
     async function selectPhotoQuiz(src) {
