@@ -4247,9 +4247,34 @@ ${JSON.stringify(issuesArr)}
        · 일일 한도에 걸리면 다음 모델로 자동 전환해 작업을 계속한다.
        · 사용자에게는 원인과 할 수 있는 일을 그대로 알려준다.
        ========================================================= */
+    /* [수정] 모델 적용 순서 + 종료·한도 사실관계 (2026-08-28 확인)
+       근거: ai.google.dev/gemini-api/docs/deprecations (2026-08-26 갱신)
+             ai.google.dev/gemini-api/docs/rate-limits (2026-08-18 갱신)
+       ---------------------------------------------------------
+       [종료 예정]
+       · gemini-2.5-flash / gemini-2.5-flash-lite → 종료일 없음.
+         "2.5가 곧 종료된다"는 말은 프리뷰 판(gemini-2.5-flash-preview-09-25 등)이
+         이미 종료된 것을 가리키는 것으로 보인다. 정식판은 아직 예정이 없다.
+       · gemini-3.1-flash-lite  → 2027-05-07 종료 예정. 권장 대체가 gemini-3.5-flash-lite 라서
+                                  1순위를 3.5 로 올리고, 3.1 은 2순위 예비로 남겼다.
+                                  (같은 lite 계열이라 3.5 가 한도에 걸려도 품질이 크게 흔들리지 않는다)
+       · gemini-3-flash-preview → 종료일은 없으나 프리뷰라 2주 통보만으로 종료 가능.
+                                  권장 대체: gemini-3.6-flash.
+       [무료 한도]
+       · 구글이 rate-limits 문서에서 모델별 무료 한도(RPM/TPM/RPD) 표를 내렸다.
+         지금은 AI Studio 의 rate-limit 화면에서 프로젝트별로 확인해야 하며,
+         "명시된 한도는 보장되지 않는다"는 단서가 붙어 있다.
+       · 3.5-flash-lite 와 3.1-flash-lite 는 공식 문서에 남아 있는 Batch enqueued tokens 표에서
+         모든 등급이 동일하다(1천만 / 5억 / 10억). 같은 할당량 등급으로 취급된다는 뜻.
+       · 다만 유료 단가는 다르다. 3.1 = $0.25/$1.50, 3.5 = $0.30/$2.50 (100만 토큰당).
+         결제를 붙이면 출력 비용이 오르니 그때 다시 볼 것.
+       ※ 그 사이 나온 것: gemini-3.5-flash(2026-05-19), gemini-3.6-flash(2026-07-21),
+         gemini-3.7-flash(2026-08). 지금은 넣지 않았다. */
     const GEMINI_MODELS = [
-        "gemini-3-flash-preview",   // 품질 우선 (무료 한도가 가장 작다)
-        "gemini-2.5-flash",         // 안정판 — 한도가 훨씬 넉넉하다
+        "gemini-3.5-flash-lite",    // 1순위 — 3.1-flash-lite 의 공식 후속. 지연·비용이 낮다
+        "gemini-3.1-flash-lite",    // 2순위 — 같은 lite 계열이라 품질 편차가 작다 (2027-05-07 종료 예정)
+        "gemini-3-flash-preview",   // 3순위 — 품질 우선 (무료 한도가 가장 작다)
+        "gemini-2.5-flash",         // 예비 — 안정판
         "gemini-2.5-flash-lite"     // 최후 수단 — 한도가 가장 크다
     ];
     let _geminiModelIdx = 0;        // 이 세션에서 지금 쓰는 모델
