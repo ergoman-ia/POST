@@ -566,6 +566,10 @@
         .ak-item .alias { margin-top: 6px; font-size: .8rem; }
         .ak-badge { font-size: .7rem; font-weight: 700; padding: 4px 10px; border-radius: 999px; background: var(--bg); color: var(--muted); border: 1px solid var(--line); cursor: pointer; white-space: nowrap; }
         .ak-badge.core { background: #ecfdf5; color: #047857; border-color: #6ee7b7; }
+        /* [수정] 전문가 판정 배지 — 편집 화면에서 직접 눌러 바꾼다(대기 → 인정 → 제외 → 대기) */
+        .ak-verdict { font-size: .7rem; font-weight: 700; padding: 4px 10px; border-radius: 999px; background: var(--bg); color: var(--muted); border: 1px dashed var(--line); cursor: pointer; white-space: nowrap; }
+        .ak-verdict.ok { background: #ecfdf5; color: #047857; border: 1px solid #6ee7b7; }
+        .ak-verdict.no { background: #fef2f2; color: #b91c1c; border: 1px solid #fecaca; }
         .ak-sup { font-size: .72rem; color: var(--faint); white-space: nowrap; }
 
         /* 정답 세트 대기 알림 · 상태 칩 */
@@ -784,7 +788,19 @@
                 <p class="section-sub">분석자가 일정 인원 이상 참여한 사진에 대해, 유사한 지적을 AI가 하나로 통합한 <b>정답 세트</b>를 만들어 두면
                     분석자 화면의 '나의 안전보건 수준 진단'에서 채점 기준으로 사용됩니다.
                     정답 세트를 만들어도 <b>위험요인 입력은 그대로 계속됩니다.</b>
-                    생성 후에 새로 들어온 입력은 아래 표에 <b>🆕 표시</b>되므로, 내용을 보고 <b>다시 생성 · 편집 · 삭제</b>를 직접 판단하시면 됩니다.</p>
+                    생성 후에 새로 들어온 입력은 아래 표에 <b>🆕 표시</b>됩니다.</p>
+                <!-- [수정] 오랜만에 들어와도 순서를 바로 알 수 있도록, 버튼 순서와 같은 차례로 적어 둔다. -->
+                <div style="background:#f8fafc; border:1px solid var(--line); border-left:3px solid var(--admin);
+                            border-radius:10px; padding:10px 14px; margin:0 0 14px; font-size:.8rem; line-height:1.75; color:var(--muted);">
+                    <b style="color:var(--ink);">진행 순서</b> — 아래 표의 버튼도 이 차례로 놓여 있습니다.<br>
+                    <b>🤖 생성</b> 참여자가 기준 인원을 넘으면 만듭니다. 만들고 나면 편집 화면이 바로 열립니다.<br>
+                    <b>✏️ 편집</b> 동의어·상위 개념을 채우고, 쪼개진 항목을 합치고, 핵심 ↔ 보너스를 정합니다. 채점 기준을 손보는 곳은 여기뿐입니다.<br>
+                    <b>🧑‍⚖️ 소수의견</b> 기준 인원에 못 미친 항목과, 수준진단에서 올라온 승격 후보를 ⭕/❌로 판정합니다.
+                    승격 후보를 보려면 아래 <b>🔄 진단 기록 불러오기</b>를 먼저 눌러야 합니다.<br>
+                    <b>↻ 다시 생성</b> 새 입력이 쌓였을 때만 누릅니다. <b>손으로 편집한 내용은 사라집니다</b>(판정·기각 이력·승격 항목은 이어받습니다).
+                    그래서 순서는 <b>다시 생성 → 편집</b>이지, 그 반대가 아닙니다.<br>
+                    <b>🗑 삭제</b> 처음 상태로 되돌립니다. 판정과 기각 이력까지 잃으므로 마지막 수단입니다.
+                </div>
                 <div class="toolbar">
                     <span style="font-size:.85rem; font-weight:600;">진단 가능 최소 인원</span>
                     <input type="number" id="minAnalysts" min="1" max="200" value="10"
@@ -810,7 +826,8 @@
                 <h3 class="section-title">📥 수준진단 유입 · 승격 후보</h3>
                 <p class="section-sub">수준진단 응시자가 입력한 위험요인을 저장합니다.
                     그중 <b>정답 세트에 없던 지적</b>을 모아, 서로 다른 응시자 <b>2명 이상</b>이 같은 뜻으로 지적한 것을
-                    <b>승격 후보</b>로 보여줍니다. 타당하다고 판단되면 정답 세트 편집에서 항목으로 추가하세요.<br>
+                    <b>승격 후보</b>로 보여줍니다. 타당하다고 판단되면 위 정답 세트 표의
+                    <b>🧑‍⚖️ 소수의견</b>에서 ⭕로 판정하세요. 저장할 때 정답 세트에 자동으로 추가됩니다.<br>
                     <span style="color:var(--muted);">※ 응시자가 입력한 위험요인은 분석자 입력과 똑같이 저장되어, <b>↻ 다시 생성</b> 시 정답 세트의 재료가 됩니다.
                     아래 승격 판정은 <b>재생성 없이 지금 바로</b> 정답에 넣거나(⭕) 앞으로도 재료에서 빼기 위한(❌) 것입니다.
                     같은 사람은 여러 번 응시해도 1명으로 셉니다.</span></p>
@@ -5190,14 +5207,24 @@ ${JSON.stringify(I)}
                     ${r.qcnt ? `<div style="font-weight:600; color:var(--admin); font-size:.7rem; margin-top:2px;" title="그중 수준진단으로 참여한 인원입니다. 정답 세트 재료에는 분석자 입력과 똑같이 포함됩니다.">그중 진단 ${r.qcnt}명</div>` : ""}</td>
                 <td>${akTxt}</td>
                 <td style="white-space:nowrap;">
-                    <button class="btn ${r.fresh > 0 ? "btn-admin" : "btn-success"} btn-sm" ${ready ? "" : "disabled"}
-                        onclick="App.makeAnswerKey('${r.p.id}')">${r.ak ? "↻ 다시 생성" : "🤖 생성"}</button>
-                    ${r.ak ? `<button class="btn btn-ghost btn-sm" onclick="App.editAnswerKey('${r.ak.sig}')">✏️ 편집</button>
-                              <button class="btn btn-soft btn-sm" onclick="App.openMinorityModal('${r.ak.sig}')">🧑‍⚖️ 소수의견${(() => {
-                    const un = (r.ak.items || []).filter((it) => it.core === false && !it.verdict).length;
-                    return un ? ` <b>${un}</b>` : "";
-                })()}</button>
-                              <button class="btn btn-ghost btn-sm" onclick="App.removeAnswerKey('${r.ak.sig}')">🗑</button>` : ""}
+                    ${r.ak
+                    /* [수정] 버튼을 진행 순서대로 놓는다.
+                       ① 편집 — 만든 뒤 가장 먼저, 가장 자주 하는 일 (안전)
+                       ② 소수의견 — 임계치 미달 항목·승격 후보 판정 (안전)
+                       ③ 다시 생성 — 손본 내용을 덮어쓴다 (파괴적). 새 입력이 있을 때만 보라색으로 부른다.
+                       ④ 삭제 — 판정·기각 이력까지 전부 잃는다 (가장 파괴적). 그래서 맨 뒤. */
+                    ? `<button class="btn btn-primary btn-sm" onclick="App.editAnswerKey('${r.ak.sig}')">✏️ 편집</button>
+                           <button class="btn btn-soft btn-sm" onclick="App.openMinorityModal('${r.ak.sig}')">🧑‍⚖️ 소수의견${(() => {
+                        const un = (r.ak.items || []).filter((it) => it.core === false && !it.verdict).length;
+                        return un ? ` <b>${un}</b>` : "";
+                    })()}</button>
+                           <button class="btn ${r.fresh > 0 ? "btn-admin" : "btn-ghost"} btn-sm" ${ready ? "" : "disabled"}
+                              onclick="App.makeAnswerKey('${r.p.id}')"
+                              title="${r.fresh > 0 ? "새로 들어온 입력까지 넣어 정답 세트를 다시 만듭니다. 손으로 편집한 내용은 사라집니다." : "새로 들어온 입력이 없습니다. 지금 눌러도 편집한 내용만 사라질 수 있습니다."}">↻ 다시 생성</button>
+                           <button class="btn btn-ghost btn-sm" onclick="App.removeAnswerKey('${r.ak.sig}')"
+                              title="정답 세트를 통째로 지웁니다. 전문가 판정과 기각 이력도 함께 사라집니다.">🗑</button>`
+                    : `<button class="btn btn-success btn-sm" ${ready ? "" : "disabled"}
+                              onclick="App.makeAnswerKey('${r.p.id}')">🤖 생성</button>`}
                 </td></tr>`;
         }).join("");
     }
@@ -5399,7 +5426,15 @@ ${JSON.stringify(I)}
     }
 
     async function removeAnswerKey(sig) {
-        if (!await customConfirm("이 사진의 정답 세트를 삭제할까요?")) return;
+        /* [수정] 삭제는 다시 생성보다 잃는 것이 많다. 다시 생성은 기각 이력(rejectedCands)과
+           승격 승인 항목(fromQuiz)을 이어받지만, 삭제는 문서를 통째로 지워 그 둘까지 사라진다.
+           그러면 예전에 '틀리다'로 걸러 낸 지적이 승격 후보로 되살아난다. 경고를 그만큼 세게 쓴다. */
+        if (!await customConfirm(
+            "이 사진의 정답 세트를 <b>통째로 삭제</b>합니다.<br><br>" +
+            "· 편집한 내용, <b>전문가 판정(⭕/❌)</b>, <b>기각 이력</b>이 모두 사라집니다.<br>" +
+            "· 승격으로 추가했던 항목도 함께 없어집니다.<br>" +
+            "· 다시 만들면 예전에 기각한 지적이 <b>승격 후보로 되살아납니다.</b><br><br>" +
+            "새 입력만 반영하려는 것이라면 <b>↻ 다시 생성</b>을 쓰세요. 계속할까요?")) return;
         try { await deleteAnswerKeyDoc(sig); renderAnswerKeyPanel(); showToast("🗑 삭제했습니다"); }
         catch (e) { showToast("❌ 삭제 실패: " + (e.message || e)); }
     }
@@ -5476,7 +5511,8 @@ ${JSON.stringify(I)}
             ? `<div style="background:#f0fdf4; border:1px solid var(--success); border-radius:10px;
                     padding:8px 12px; margin:0 0 12px; font-size:.78rem; color:#166534;">
                  ✅ 이미 판정을 마친 항목 <b>${doneCnt}건</b>은 목록에서 내렸습니다.
-                 다시 보거나 되돌리려면 <b>✏️ 편집</b>에서 확인하세요.</div>`
+                 다시 보거나 판정을 되돌리려면 <b>✏️ 편집</b>에서 항목의
+                 <b>⭕ 인정 / ❌ 제외</b> 배지를 누르세요.</div>`
             : "";
 
         if (minors.length === 0 && cand.length === 0) {
@@ -5845,8 +5881,12 @@ ${JSON.stringify(I)}
                     <input type="checkbox" class="ak-pick" style="width:18px; height:18px; flex:none;">
                     <input type="text" class="ak-title" value="${esc(it.title)}" placeholder="대표 문구 (예: 안전모 미착용)">
                     <span class="ak-badge ${it.core !== false ? "core" : ""}" onclick="App.akToggleCore(${i})">${it.core !== false ? "핵심" : "보너스"}</span>
-                    ${it.verdict === "ok" ? `<span class="ak-sup" style="color:var(--success)">⭕ 전문가 인정</span>` : ""}
-                    ${it.verdict === "no" ? `<span class="ak-sup" style="color:var(--danger)">❌ 채점 제외</span>` : ""}
+                    ${/* [수정] 판정 배지를 눌러 바꿀 수 있게 한다. 예전에는 표시만 되고 되돌릴 방법이
+                          없어서, 소수의견에서 한번 찍으면 항목을 통째로 지우는 수밖에 없었다. */
+                    (it.core === false || it.verdict)
+                        ? `<span class="ak-verdict ${esc(it.verdict || "")}" onclick="App.akToggleVerdict(${i})"
+                                 title="전문가 판정 — 누를 때마다 판정 대기 → ⭕ 인정 → ❌ 제외 → 판정 대기 순으로 바뀝니다. ❌는 채점에서 완전히 빠집니다.">${verdictLabel(it.verdict)}</span>`
+                        : ""}
                     <span class="ak-sup">${it.support || 1}명</span>
                     <button class="icon-btn" title="삭제" onclick="App.akDelItem(${i})">🗑</button>
                 </div>
@@ -5885,6 +5925,30 @@ ${JSON.stringify(I)}
         const b = el.querySelector(".ak-badge");
         const on = b.classList.toggle("core");
         b.textContent = on ? "핵심" : "보너스";
+    }
+
+    /* [수정] 전문가 판정 배지 — 편집 화면에서 직접 바꾼다.
+       readAkEditor 가 data-verdict / data-verdictby / data-verdictat 를 그대로 읽어 저장하므로,
+       세 값을 여기서 함께 갱신해 두면 akSave 로 바로 반영된다. */
+    function verdictLabel(v) {
+        return v === "ok" ? "⭕ 인정" : (v === "no" ? "❌ 제외" : "판정 대기");
+    }
+    function akToggleVerdict(i) {
+        const el = document.querySelectorAll("#akItems .ak-item")[i];
+        if (!el) return;
+        const cur = el.dataset.verdict || "";
+        const next = cur === "" ? "ok" : (cur === "ok" ? "no" : "");
+        el.dataset.verdict = next;
+        if (next) {
+            const who = String(((document.getElementById("userName") || {}).value) || "").trim();
+            el.dataset.verdictby = who || "관리자";
+            el.dataset.verdictat = String(Date.now());
+        } else {
+            el.dataset.verdictby = "";
+            el.dataset.verdictat = "0";
+        }
+        const b = el.querySelector(".ak-verdict");
+        if (b) { b.className = "ak-verdict " + next; b.textContent = verdictLabel(next); }
     }
     function akDelItem(i) {
         const items = readAkEditor();
@@ -6135,7 +6199,7 @@ ${JSON.stringify(I)}
         showHome, enterFind, enterQuiz, onSubmitClick, quizRetry,
         /* --- 정답 세트 관리(관리자) --- */
         saveMinAnalysts, refreshAnswerKeys, makeAnswerKey, editAnswerKey, removeAnswerKey,
-        akToggleCore, akDelItem, akAddItem, akMerge, akSave, closeAkModal,
+        akToggleCore, akToggleVerdict, akDelItem, akAddItem, akMerge, akSave, closeAkModal,
         akToggleUsage, akShowEntries,
         /* --- [수정3] 수준진단 유입 --- */
         refreshQuizResults, exportQuizResults, clearQuizResults,
