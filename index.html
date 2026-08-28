@@ -164,6 +164,7 @@
         .btn-admin { background: var(--admin); }
         .brand-quiz .dot { background: var(--admin); }
         .brand-find .dot { background: var(--primary); }
+        .brand-admin .dot { background: var(--admin); }
         .btn-success { background: var(--success); }
         .btn-danger { background: var(--danger); }
         .btn-ghost { background: var(--surface); color: var(--muted); border-color: var(--line); }
@@ -240,13 +241,6 @@
             padding: 7px 14px; border-radius: 999px; pointer-events: none; z-index: 6;
             display: flex; align-items: center; gap: 6px; backdrop-filter: blur(4px);
         }
-        .stage-tools { position: absolute; right: 10px; bottom: 10px; z-index: 6; display: flex; gap: 6px; }
-        .stage-tools button {
-            width: 38px; height: 38px; border-radius: 10px; border: none; cursor: pointer;
-            background: rgba(255, 255, 255, .92); color: var(--ink); font-size: 1.05rem;
-            box-shadow: var(--shadow); display: flex; align-items: center; justify-content: center;
-        }
-
         /* 문제점 리스트 */
         .issue-list { list-style: none; padding: 0; margin: 14px 0 0; display: flex; flex-direction: column; gap: 8px; }
         .issue-item {
@@ -559,7 +553,6 @@
         .res-item { border: 1px solid var(--line); border-radius: var(--radius-sm); padding: 10px 12px; font-size: .88rem; background: var(--surface); }
         .res-item.hit { border-color: #6ee7b7; background: #ecfdf5; }
         .res-item.part { border-color: #fcd34d; background: #fffbeb; }
-        .res-item.miss { border-color: #fecaca; background: #fef2f2; }
         .res-item.extra { border-color: #bfdbfe; background: var(--primary-soft); }
         .res-item .sub { display: block; color: var(--muted); font-size: .76rem; margin-top: 4px; }
         .res-cat { font-size: .68rem; font-weight: 700; color: #fff; background: var(--faint); border-radius: 5px; padding: 2px 7px; margin-right: 6px; white-space: nowrap; }
@@ -1263,6 +1256,7 @@
         document.querySelectorAll("#modeSeg button").forEach((b) => b.classList.remove("active"));
 
         if (mode === "admin") {
+            applyBrand("admin");          // [수정] 진입 경로와 상관없이 "관리자 모드"로 통일
             document.getElementById("adminView").classList.add("active");
             document.querySelector('#modeSeg [data-mode="admin"]').classList.add("active");
             renderTable();
@@ -1271,6 +1265,7 @@
             renderQuizInflowPanel();   // [수정3] 진단 유입 패널 (기록은 버튼으로 수동 로드)
             hideSubmitBar();
         } else {
+            applyBrand(appMode);          // [수정] 돌아갈 때는 원래 있던 활동의 제목을 되살린다
             document.getElementById("userView").classList.add("active");
             document.querySelector('#modeSeg [data-mode="user"]').classList.add("active");
             updateSubmitBar();
@@ -3414,7 +3409,6 @@ ${JSON.stringify(issuesArr)}
     let appMode = "home";        // "home" | "find" | "quiz"
     let answerKeys = {};         // sig -> { sig, docId, photoId, analystCount, builtAt, items[] }
     let quizKey = null;          // 현재 진단 중인 정답 세트
-    let lastQuizResult = null;
     let _akLoaded = false;
     let _akEditSig = null;
 
@@ -3548,7 +3542,6 @@ ${JSON.stringify(issuesArr)}
        그 사이 '생성하세요'로 보여서 같은 정답 세트를 또 만드는 일이 생겼다. */
     let _akUnsub = null;
     let _akFresh = false;              // 서버에서 최신본을 받았는지
-    let _akLastSnap = 0;               // 정답 세트 최신본이 도착한 시각
     let _akLive = false;               // [수정22] 실시간 구독이 서버에 붙어 있는지
     let _akLastVerify = 0;             // [수정30] 마지막으로 '서버에 직접 물어본' 시각
     const AK_VERIFY_MS = 15000;        // [수정30] 구독이 살아 보여도 이 간격으로는 확인한다
@@ -3790,7 +3783,6 @@ ${JSON.stringify(issuesArr)}
         answerKeys = map;
         _akLoaded = true;
         _akFresh = true;
-        _akLastSnap = Date.now();      // [수정16]
         _akLastVerify = Date.now();    // [수정30] 서버와 방금 닿았다
         repaintAnswerKeyViews();
     }
@@ -4715,7 +4707,12 @@ ${JSON.stringify(I)}
     const BRAND_TEXT = {
         home: "현장 위험요인 찾기 · 수준진단",
         find: "현장 사진에서 위험요인 찾기",
-        quiz: "나의 안전보건 수준 진단"
+        quiz: "나의 안전보건 수준 진단",
+        /* [수정] 관리자 화면은 어느 활동에서 들어왔든 항상 같은 제목을 쓴다.
+           예전에는 관리자로 넘어가도 헤드라인을 바꾸지 않아서, '위험요인 찾기'에서
+           들어오면 '현장 사진에서 위험요인 찾기', '수준 진단'에서 들어오면
+           '나의 안전보건 수준 진단'이 그대로 남아 있었다. */
+        admin: "관리자 모드"
     };
     function applyBrand(mode) {
         const el = document.getElementById("brandText");
@@ -4724,6 +4721,7 @@ ${JSON.stringify(I)}
         if (wrap) {
             wrap.classList.toggle("brand-quiz", mode === "quiz");
             wrap.classList.toggle("brand-find", mode === "find");
+            wrap.classList.toggle("brand-admin", mode === "admin");
         }
     }
 
@@ -5011,7 +5009,6 @@ ${JSON.stringify(I)}
         try {
             const res = await gradeQuiz(inputs, quizKey, busyStep);
             busyHide();
-            lastQuizResult = res;
             renderQuizResult(res);
             // [수정3] 화면을 먼저 보여준 뒤, 응시 기록을 백그라운드로 저장한다.
             // 저장 실패가 채점 결과 표시를 막지 않도록 await 하지 않는다.
