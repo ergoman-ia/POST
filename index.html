@@ -1506,7 +1506,7 @@
        REST 폴백 — Firebase 인증/스트리밍을 거치지 않고
        단순 HTTPS GET 한 번으로 컬렉션을 읽는다.
        (Brave iOS처럼 인증·WebChannel이 막히는 환경 우회용.
-        단, Firestore 보안 규칙에서 해당 컬렉션 '읽기'가 공개여야 한다.)
+        [수정37] 보안 규칙이 로그인을 요구하므로 요청마다 로그인 토큰을 붙인다.)
        ========================================================= */
     function restVal(v) {
         if (v == null) return null;
@@ -1622,6 +1622,7 @@
        ========================================================= */
     let _restToken = null, _restTokenExp = 0;
     let _restUid = "";                          // [수정34] 방금 돌려준 토큰의 UID (문서의 uid 필드에 쓴다)
+    let _anonWaited = false;                    // [수정37] SDK 익명 로그인 대기는 처음 한 번만 한다
     const REST_RT_KEY = "rest_anon_refresh";   // 익명 계정 refresh token 저장 키
 
     /* [수정34] REST 요청에 쓸 토큰을 고르는 순서
@@ -1649,8 +1650,10 @@
         }
 
         if (window.fbAuth) {
-            if (!window.__authReady && window.__anonSignIn) {
+            // [수정37] SDK 인증이 막힌 브라우저에서 요청마다 3초씩 기다리지 않도록 한 번만 기다린다.
+            if (!window.__authReady && window.__anonSignIn && !_anonWaited) {
                 await Promise.race([window.__anonSignIn, new Promise((r) => setTimeout(r, 3000))]);
+                _anonWaited = true;
             }
             if (window.fbAuth.uid()) {
                 try {
@@ -1916,7 +1919,8 @@
         let verdict = "원인 불명 — 위 결과를 캡처해 공유해 주세요.";
         if (!navigator.onLine) verdict = "네트워크가 끊겨 있습니다.";
         else if (!restBad) verdict = "REST 직접 읽기는 성공했습니다! 이 버전은 인증이 막혀도 이 경로로 사진을 불러옵니다 → '다시 시도'를 누르면 보일 것입니다.";
-        else if (/403|공개 읽기/.test(restMsg)) verdict = "보안 규칙이 공개 읽기를 막고 있습니다 → Firestore 규칙에서 site_photos·inspections 읽기를 공개로 열면 해결됩니다.";
+        // [수정37] 규칙을 공개로 열라는 예전 안내는 보안을 되돌리므로 바꾼다.
+        else if (/403/.test(restMsg)) verdict = "보안 규칙이 읽기를 거절했습니다 → Firebase 콘솔에서 익명 로그인이 사용 설정되어 있는지 확인하세요. 규칙을 공개로 열지는 마세요.";
         else if (restBad && (idb !== "사용 가능" || !authOk)) verdict = "Brave가 구글(googleapis) 요청 자체를 막고 있습니다. Shields를 끈 뒤 Brave를 완전히 종료했다 다시 켜보세요. 그래도 안 되면 이 도메인은 Brave에서 막혀 페이지 코드로는 우회 불가 — 해당 사용자는 사파리/크롬 사용 권장.";
         else verdict = "연결/전송이 막혀 읽기가 실패합니다(브라우저 차단 또는 네트워크).";
 
@@ -4525,7 +4529,10 @@ ${JSON.stringify(issuesArr)}
             body: JSON.stringify(payload)
         }), ms, label);
         if (!res.ok) throw new Error(`중계 서버 응답 오류(${res.status})`);
-        return await res.json();
+        // [수정37] 앱 스크립트가 할당량 초과 등으로 오류 페이지(HTML)를 돌려주면 JSON 해석이 실패한다.
+        const raw = await res.text();
+        try { return JSON.parse(raw); }
+        catch (_) { throw new Error("중계 서버가 올바른 응답을 주지 않았습니다 (앱 스크립트 배포 상태나 사용 한도를 확인하세요)"); }
     }
 
     // 중계 서버를 거쳐 Gemini 한 번 호출. 실패하면 예전 SDK처럼 메시지에
